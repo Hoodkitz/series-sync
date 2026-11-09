@@ -1,0 +1,6 @@
+[project]
+name = "series-sync"
+version = "0.1.0"
+description = "Series & Film Dubbing SaaS"
+requires-python = ">=3.11"
+dependencies = ["fastapi", "uvicorn", "sqlalchemy", "asyncpg", "pydantic", "httpx", "redis", "celery", "whisper", "torch"]
