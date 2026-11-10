@@ -1,9 +1,12 @@
 """Series Sync API."""
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from apps.api.routers.pipeline import router as pipeline_router
 from apps.api.routers.jobs import router as jobs_router
 
 app = FastAPI(title="Series Sync SaaS", version="1.0.0")
+
+app.include_router(pipeline_router)
 
 app.include_router(jobs_router)
 
