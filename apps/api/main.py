@@ -1,16 +1,22 @@
-"""Series Sync API."""
+"""Series Sync API entry point."""
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from apps.api.routers.pipeline import router as pipeline_router
-from apps.api.routers.jobs import router as jobs_router
+from apps.core.config import settings
+from apps.api.routers import pipeline, voices, stats
 
-app = FastAPI(title="Series Sync SaaS", version="1.0.0")
+app = FastAPI(title="Series Sync SaaS", version="1.0.0", docs_url="/docs")
 
-app.include_router(pipeline_router)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS.split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-app.include_router(jobs_router)
-
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.include_router(pipeline.router)
+app.include_router(voices.router)
+app.include_router(stats.router)
 
 @app.get("/")
 def root():
@@ -18,4 +24,4 @@ def root():
 
 @app.get("/healthz")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "version": "1.0.0"}
