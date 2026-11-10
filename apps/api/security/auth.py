@@ -51,8 +51,9 @@ async def get_current_user(token: str = Depends(oauth2_scheme), session: AsyncSe
         raise credentials_exception
 
     # Set the current tenant for RLS in this session
+    # SET LOCAL cannot take bind parameters; set_config(..., is_local=true) is transaction-scoped
     await session.execute(
-        sa.text("SET LOCAL app.current_tenant = :tenant_id"),
+        sa.text("SELECT set_config('app.current_tenant', :tenant_id, true)"),
         {"tenant_id": str(user.tenant_id)}
     )
 
