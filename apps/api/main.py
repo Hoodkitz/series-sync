@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from apps.core.config import settings
 from apps.api.routers import pipeline, voices, stats
 
+from apps.api.routers import auth
 app = FastAPI(title="Series Sync SaaS", version="1.0.0", docs_url="/docs")
 
 app.add_middleware(
@@ -14,6 +15,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
 app.include_router(pipeline.router)
 app.include_router(voices.router)
 app.include_router(stats.router)

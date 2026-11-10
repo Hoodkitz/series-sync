@@ -7,6 +7,8 @@ from apps.core.models import JobStatus, QualityScore
 
 
 class JobCreate(BaseModel):
+    rights: bool
+    voice_profile_id: UUID
     tenant_id: UUID
     source_video_url: str
     source_language: str = "en"
@@ -82,6 +84,7 @@ class QAReportResponse(BaseModel):
 
 
 class VoiceCreate(BaseModel):
+    consent: bool
     tenant_id: UUID
     speaker_name: str
     voice_preset: str

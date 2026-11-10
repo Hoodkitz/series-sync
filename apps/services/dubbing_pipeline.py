@@ -1,129 +1,90 @@
 """Dubbing pipeline orchestration service."""
 import asyncio
-import httpx
-import subprocess
-import tempfile
-import os
 from typing import Dict, List, Optional
 from datetime import datetime
-from apps.core.config import settings
-from apps.core.models import SyncJob, JobStatus, QAReport
+from uuid import UUID
 
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+
+from apps.db.models import SyncJob, VoiceProfile
+from apps.core.models import JobStatus, QAReport
+from apps.services.interfaces.asr import ASRService
+from apps.services.interfaces.translation import TranslationService
+from apps.services.interfaces.tts import TTSService
+from apps.services.interfaces.lipsync import LipSyncService
+from apps.services.interfaces.qa import QAService
 
 class DubbingPipeline:
-    def __init__(self):
-        self._jobs: Dict[str, SyncJob] = {}
-        self._lock = asyncio.Lock()
+    def __init__(self, asr: ASRService, translator: TranslationService, tts: TTSService, lipsync: LipSyncService, qa: QAService, session_factory):
+        self.asr = asr
+        self.translator = translator
+        self.tts = tts
+        self.lipsync = lipsync
+        self.qa = qa
+        self.session_factory = session_factory
 
-    async def create_job(self, tenant_id: str, source_url: str, source_lang: str = "en", target_lang: str = "de") -> SyncJob:
-        """Create a new dubbing job."""
-        job = SyncJob(
-            id=tenant_id + "_" + datetime.utcnow().strftime("%Y%m%d%H%M%S"),
-            tenant_id=tenant_id,
-            source_language=source_lang,
-            target_language=target_lang,
-            status=JobStatus.UPLOADED,
-            source_video_url=source_url,
-        )
-        self._jobs[job.id] = job
-        return job
-
-    async def get_job(self, job_id: str) -> Optional[SyncJob]:
-        return self._jobs.get(job_id)
-
-    async def list_jobs(self, tenant_id: str) -> List[SyncJob]:
-        return [j for j in self._jobs.values() if j.tenant_id == tenant_id]
-
-    async def advance_stage(self, job_id: str, stage: JobStatus) -> SyncJob:
-        """Advance a job to the next stage."""
-        async with self._lock:
-            job = self._jobs.get(job_id)
+    async def run_pipeline(self, job_id: UUID, voice_profile_id: UUID):
+        async with self.session_factory() as session:
+            job = await session.get(SyncJob, job_id)
             if not job:
                 raise ValueError("Job not found")
             
-            stages = [s.value for s in JobStatus]
-            current_idx = stages.index(job.status.value)
-            next_idx = current_idx + 1
-            
-            if next_idx < len(stages):
-                job.status = JobStatus(stages[next_idx])
-            elif next_idx >= len(stages) - 1:
-                # Complete the job
-                job.status = JobStatus.COMPLETED
+            if not job.rights:
+                job.status = JobStatus.FAILED.value
+                job.errors = job.errors + ["Missing rights for this content."] if job.errors else ["Missing rights for this content."]
+                await session.commit()
+                return
+
+            voice = await session.get(VoiceProfile, voice_profile_id)
+            if not voice or not voice.consent:
+                job.status = JobStatus.FAILED.value
+                job.errors = job.errors + ["Voice profile missing or no consent provided."] if job.errors else ["Voice profile missing or no consent provided."]
+                await session.commit()
+                return
+
+            try:
+                # 1. ASR
+                job.status = JobStatus.TRANSCRIPTION.value
+                await session.commit()
+                transcription = await self.asr.transcribe(job.source_video_url)
+                job.transcription = transcription
+
+                # 2. Translation
+                job.status = JobStatus.TRANSLATION.value
+                await session.commit()
+                translation = await self.translator.translate(
+                    transcription, job.source_language, job.target_language
+                )
+                job.translation = translation
+
+                # 3. TTS
+                job.status = JobStatus.TTS_GENERATION.value
+                await session.commit()
+                tts_audio = await self.tts.synthesize(translation, str(voice.id))
+                job.tts_audio = tts_audio
+
+                # 4. Lip Sync
+                job.status = JobStatus.LIP_SYNC.value
+                await session.commit()
+                # Adding AI label to metadata in a real implementation using FFmpeg
+                final_video = await self.lipsync.sync_lips(job.source_video_url, tts_audio)
+                job.final_video = final_video
+                job.output_video_url = final_video
+
+                # 5. QA
+                job.status = JobStatus.QA_VALIDATION.value
+                await session.commit()
+                qa_report = await self.qa.validate(final_video, translation)
+                job.qa_report = qa_report
+                job.quality_score = (qa_report["lip_sync_score"] + qa_report["audio_quality_score"] + qa_report["translation_accuracy_score"]) / 3
+
+                # Complete
+                job.status = JobStatus.COMPLETED.value
                 job.completed_at = datetime.utcnow()
-            
-            return job
+                await session.commit()
 
-    async def run_qa(self, job_id: str) -> QAReport:
-        """Run QA validation on a completed job."""
-        job = self._jobs.get(job_id)
-        if not job:
-            raise ValueError("Job not found")
-        
-        # Simulate QA scores (replace with real ML model in production)
-        import random
-        qa = QAReport(
-            job_id=job.id,
-            lip_sync_score=round(random.uniform(0.85, 0.99), 2),
-            audio_quality_score=round(random.uniform(0.90, 0.99), 2),
-            translation_accuracy_score=round(random.uniform(0.88, 0.98), 2),
-            overall_pass=(
-                job.quality_score is not None and
-                job.quality_score >= 0.85 and
-                job.status == JobStatus.COMPLETED
-            ),
-            issues=[],
-            notes="QA passed" if qa.overall_pass else "Review required",
-        )
-        
-        job.quality_score = round(
-            qa.lip_sync_score + qa.audio_quality_score + qa.translation_accuracy_score
-        ) / 3
-        job.qa_report = qa
-        job.status = JobStatus.QA_VALIDATION
-        
-        return qa
-
-    async def complete_job(self, job_id: str, output_url: str) -> SyncJob:
-        """Mark job as completed with output URL."""
-        job = self._jobs.get(job_id)
-        if not job:
-            raise ValueError("Job not found")
-        
-        job.status = JobStatus.COMPLETED
-        job.output_video_url = output_url
-        job.completed_at = datetime.utcnow()
-        job.qa_report = {
-            "lid_sync_score": 0.95,
-            "audio_quality_score": 0.98,
-            "translation_accuracy_score": 0.94,
-            "overall_pass": True,
-            "issues": [],
-        }
-        
-        return job
-
-    async def fail_job(self, job_id: str, error: str):
-        """Mark job as failed."""
-        job = self._jobs.get(job_id)
-        if not job:
-            raise ValueError("Job not found")
-        
-        job.status = JobStatus.FAILED
-        job.errors.append(error)
-        return job
-
-class PipelineManager:
-    _instance = None
-    _lock = asyncio.Lock()
-    
-    @classmethod
-    async def get_instance(cls):
-        if cls._instance is None:
-            async with cls._lock:
-                if cls._instance is None:
-                    cls._instance = DubbingPipeline()
-        return cls._instance
-
-async def get_pipeline():
-    return await PipelineManager.get_instance()
+            except Exception as e:
+                job.status = JobStatus.FAILED.value
+                job.errors = job.errors + [str(e)] if job.errors else [str(e)]
+                await session.commit()
