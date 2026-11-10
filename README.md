@@ -28,3 +28,11 @@ Streaming-Plattformen, Filmstudios, Content-Distributoren, YouTuber
 - Pay-per-Episode
 - Monatliches Abo für Studios
 - Enterprise-Lizenz
+
+## Setup
+
+1. **Environment Config**: Create a `.env` file from the provided settings (see `apps/core/config.py`). You will need `DATABASE_URL` (PostgreSQL) and other keys.
+2. **Dependencies**: Ensure you have PostgreSQL, FFmpeg, and Python >= 3.11 installed. Run `pip install -r requirements.txt`.
+3. **Database Migration**: Start the Postgres server, create the `seriessync` database, and run `alembic upgrade head`.
+4. **Testing**: Run tests via `pytest tests/ -v`.
+5. **Run the server**: Start the FastAPI server using `uvicorn apps.api.main:app --reload`.

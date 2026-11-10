@@ -1,34 +1,68 @@
 """Pipeline API endpoints for Series Sync."""
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy import select
 from uuid import UUID
 from datetime import datetime
+
+from apps.api.security.auth import get_current_active_user
+from apps.api.security.permissions import check_permission
+from apps.core.permissions import Permission
+from apps.db.models import User
+
 from apps.api.schemas.pipeline import (
     JobCreate, JobResponse, JobListResponse, QAReportResponse,
     StageAdvance, StageResponse
 )
-from apps.db.session import get_session
+from apps.db.session import get_session, engine
 from apps.db.models import SyncJob as SyncJobModel, VoiceProfile as VoiceProfileModel, Tenant as TenantModel
-from apps.services.dubbing_pipeline import DubbingPipeline, get_pipeline
+from apps.services.dubbing_pipeline import DubbingPipeline
+from apps.services.fakes.asr import FakeASRService
+from apps.services.fakes.translation import FakeTranslationService
+from apps.services.fakes.tts import FakeTTSService
+from apps.services.fakes.lipsync import FakeLipSyncService
+from apps.services.fakes.qa import FakeQAService
 
 router = APIRouter(prefix="/jobs", tags=["pipeline"])
 
+def get_pipeline():
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    return DubbingPipeline(
+        asr=FakeASRService(),
+        translator=FakeTranslationService(),
+        tts=FakeTTSService(),
+        lipsync=FakeLipSyncService(),
+        qa=FakeQAService(),
+        session_factory=session_factory
+    )
+
 
 @router.post("", response_model=JobResponse)
-async def create_job(req: JobCreate, session: AsyncSession = Depends(get_session)):
+async def create_job(req: JobCreate, background_tasks: BackgroundTasks, current_user: User = Depends(check_permission(Permission.CREATE_JOB)), session: AsyncSession = Depends(get_session)):
     stmt = select(TenantModel).where(TenantModel.id == req.tenant_id)
     tenant = (await session.execute(stmt)).scalars().first()
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
     
-    pipeline = await get_pipeline()
-    job = await pipeline.create_job(str(req.tenant_id), req.source_video_url, req.source_language, req.target_language)
+    job = SyncJobModel(
+        tenant_id=req.tenant_id,
+        source_video_url=req.source_video_url,
+        source_language=req.source_language,
+        target_language=req.target_language,
+        rights=req.rights,
+    )
+    session.add(job)
+    await session.commit()
+    await session.refresh(job)
+
+    pipeline = get_pipeline()
+    background_tasks.add_task(pipeline.run_pipeline, job.id, req.voice_profile_id)
+
     return job
 
 
 @router.get("/{job_id}", response_model=JobResponse)
-async def get_job(job_id: str, session: AsyncSession = Depends(get_session)):
+async def get_job(job_id: str, current_user: User = Depends(check_permission(Permission.READ_JOB)), session: AsyncSession = Depends(get_session)):
     stmt = select(SyncJobModel).where(SyncJobModel.id == job_id)
     result = await session.execute(stmt)
     job = result.scalars().first()
@@ -38,39 +72,24 @@ async def get_job(job_id: str, session: AsyncSession = Depends(get_session)):
 
 
 @router.get("/tenant/{tenant_id}")
-async def list_jobs(tenant_id: UUID, session: AsyncSession = Depends(get_session)):
+async def list_jobs(tenant_id: UUID, current_user: User = Depends(check_permission(Permission.READ_JOB)), session: AsyncSession = Depends(get_session)):
     stmt = select(SyncJobModel).where(SyncJobModel.tenant_id == tenant_id)
     result = await session.execute(stmt)
     return JobListResponse(jobs=[j async for j in result.scalars])
 
 
-@router.post("/{job_id}/advance")
-async def advance_stage(job_id: str, req: StageAdvance, session: AsyncSession = Depends(get_session)):
-    pipeline = await get_pipeline()
-    job = await pipeline.advance_stage(job_id, req.stage)
-    return job
-
-
 @router.post("/{job_id}/qa")
 async def run_qa(job_id: str, session: AsyncSession = Depends(get_session)):
-    pipeline = await get_pipeline()
-    qa = await pipeline.run_qa(job_id)
-    return QAReportResponse(
-        job_id=qa.job_id,
-        lip_sync_score=qa.lip_sync_score,
-        audio_quality_score=qa.audio_quality_score,
-        translation_accuracy_score=qa.translation_accuracy_score,
-        overall_pass=qa.overall_pass,
-        issues=qa.issues,
-        notes=qa.notes,
-    )
+    pipeline = get_pipeline()
+    job = await session.get(SyncJobModel, job_id)
+    if not job or not job.final_video or not job.translation:
+        raise HTTPException(status_code=404, detail="Job not ready for QA")
 
-
-@router.post("/{job_id}/complete")
-async def complete_job(job_id: str, output_url: str, session: AsyncSession = Depends(get_session)):
-    pipeline = await get_pipeline()
-    job = await pipeline.complete_job(job_id, output_url)
-    return job
+    qa = await pipeline.qa.validate(job.final_video, job.translation)
+    job.qa_report = qa
+    job.quality_score = (qa["lip_sync_score"] + qa["audio_quality_score"] + qa["translation_accuracy_score"]) / 3
+    await session.commit()
+    return qa
 
 
 @router.get("/{job_id}/qa-report")
