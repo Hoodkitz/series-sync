@@ -14,8 +14,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 class UserCreate(BaseModel):
     email: EmailStr
     password: str
-    tenant_id: UUID
-    role: str = "user"
+    tenant_name: str | None = None  # a registration always creates its own tenant (owner = admin)
 
 class Token(BaseModel):
     access_token: str
@@ -33,26 +32,26 @@ class UserResponse(BaseModel):
 
 @router.post("/register", response_model=UserResponse)
 async def register(user_in: UserCreate, session: AsyncSession = Depends(get_session)):
-    # Check tenant exists
-    result = await session.execute(select(Tenant).where(Tenant.id == user_in.tenant_id))
-    if not result.scalars().first():
-        raise HTTPException(status_code=404, detail="Tenant not found")
-
-    # Check email unique
+    """Self-registration opens a NEW tenant; the registering user becomes its admin.
+    Joining an existing tenant is an admin action, never a client-chosen tenant_id/role."""
+    if len(user_in.password) < 10:
+        raise HTTPException(status_code=422, detail="Password must have at least 10 characters")
     result = await session.execute(select(User).where(User.email == user_in.email))
     if result.scalars().first():
         raise HTTPException(status_code=400, detail="Email already registered")
-
+    tenant = Tenant(name=user_in.tenant_name or f"{user_in.email.split('@')[0]}'s workspace")
+    session.add(tenant)
+    await session.flush()
     db_user = User(
         email=user_in.email,
         hashed_password=get_password_hash(user_in.password),
-        tenant_id=user_in.tenant_id,
-        role=user_in.role
+        tenant_id=tenant.id,
+        role="admin",
     )
     session.add(db_user)
     await session.commit()
-    await session.refresh(db_user)
-    return db_user
+    return UserResponse(id=db_user.id, email=db_user.email, tenant_id=tenant.id, role=db_user.role,
+                        is_active=True)
 
 @router.post("/token", response_model=Token)
 async def login(form_data: OAuth2PasswordRequestForm = Depends(), session: AsyncSession = Depends(get_session)):

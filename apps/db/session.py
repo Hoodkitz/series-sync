@@ -11,3 +11,11 @@ Base = declarative_base()
 async def get_session():
     async with AsyncSessionLocal() as session:
         yield session
+
+
+async def set_tenant_context(session: AsyncSession, tenant_id) -> None:
+    """Transaction-local RLS context (no-op on SQLite used in unit tests)."""
+    if session.bind.dialect.name != "postgresql":
+        return
+    from sqlalchemy import text
+    await session.execute(text("SELECT set_config('app.current_tenant', :tid, true)"), {"tid": str(tenant_id)})

@@ -1,4 +1,5 @@
 """Pydantic schemas for Series Sync pipeline."""
+from typing import Optional
 from pydantic import BaseModel, Field
 from uuid import UUID
 from datetime import datetime
@@ -9,7 +10,7 @@ from apps.core.models import JobStatus, QualityScore
 class JobCreate(BaseModel):
     rights: bool
     voice_profile_id: UUID
-    tenant_id: UUID
+    tenant_id: Optional[UUID] = None  # ignored: tenant comes from the token
     source_video_url: str
     source_language: str = "en"
     target_language: str = "de"
@@ -17,7 +18,7 @@ class JobCreate(BaseModel):
 
 class JobResponse(BaseModel):
     id: str
-    tenant_id: UUID
+    tenant_id: Optional[UUID] = None  # ignored: tenant comes from the token
     source_language: str
     target_language: str
     status: str
@@ -48,7 +49,7 @@ class StageAdvance(BaseModel):
 
 class StageResponse(BaseModel):
     id: str
-    tenant_id: UUID
+    tenant_id: Optional[UUID] = None  # ignored: tenant comes from the token
     status: str
     source_language: str
     target_language: str
@@ -85,7 +86,7 @@ class QAReportResponse(BaseModel):
 
 class VoiceCreate(BaseModel):
     consent: bool
-    tenant_id: UUID
+    tenant_id: Optional[UUID] = None  # ignored: tenant comes from the token
     speaker_name: str
     voice_preset: str
     language: str = "de"
@@ -96,7 +97,7 @@ class VoiceCreate(BaseModel):
 
 class VoiceResponse(BaseModel):
     id: UUID
-    tenant_id: UUID
+    tenant_id: Optional[UUID] = None  # ignored: tenant comes from the token
     speaker_name: str
     voice_preset: str
     language: str

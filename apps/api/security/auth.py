@@ -39,13 +39,11 @@ async def get_current_user(token: str = Depends(oauth2_scheme), session: AsyncSe
     )
     try:
         payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
-        user_id: str = payload.get("sub")
-        if user_id is None:
-            raise credentials_exception
-    except JWTError:
+        user_id = UUID(str(payload.get("sub")))
+    except (JWTError, ValueError, TypeError):
         raise credentials_exception
 
-    result = await session.execute(select(User).where(User.id == UUID(user_id)))
+    result = await session.execute(select(User).where(User.id == user_id))
     user = result.scalars().first()
     if user is None:
         raise credentials_exception

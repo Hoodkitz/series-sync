@@ -30,11 +30,16 @@ class DubbingPipeline:
         self.audio_fit = AudioFitAdapter()
         self.provenance = ProvenanceAdapter()
 
-    async def run_pipeline(self, job_id: UUID, voice_profile_id: UUID):
+    async def run_pipeline(self, job_id: UUID, voice_profile_id: UUID, tenant_id: UUID | None = None):
+        from apps.db.session import set_tenant_context
         async with self.session_factory() as session:
+            if tenant_id is not None:
+                await set_tenant_context(session, tenant_id)
             job = await session.get(SyncJob, job_id)
             if not job:
                 raise ValueError("Job not found")
+            if job.status == JobStatus.COMPLETED.value:
+                return  # idempotent: a finished job is never re-rendered; crashed stages resume below
             
             # Associate voice profile to job if not already
             if getattr(job, 'voice_profile_id', None) != voice_profile_id:
@@ -46,14 +51,16 @@ class DubbingPipeline:
 
             if not job.rights:
                 job.status = JobStatus.FAILED.value
-                job.errors = job.errors + ["Missing rights for this content."] if job.errors else ["Missing rights for this content."]
+                job.errors = (job.errors or []) + ["Missing rights for this content."]
                 await session.commit()
                 return
 
             voice = await session.get(VoiceProfile, voice_profile_id)
+            if voice is not None and voice.tenant_id != job.tenant_id:
+                voice = None  # never clone a voice that belongs to another tenant
             if not voice or not voice.consent:
                 job.status = JobStatus.FAILED.value
-                job.errors = job.errors + ["Voice profile missing or no consent provided."] if job.errors else ["Voice profile missing or no consent provided."]
+                job.errors = (job.errors or []) + ["Voice profile missing or no consent provided."]
                 await session.commit()
                 return
 
@@ -129,11 +136,13 @@ class DubbingPipeline:
 
             except Exception as e:
                 await session.rollback()
-                # Refetch job to update its status after rollback
+                if tenant_id is not None:
+                    await set_tenant_context(session, tenant_id)  # rollback dropped the transaction-local context
                 job = await session.get(SyncJob, job_id)
-                if getattr(e, 'is_hitl', False) or "HITL review required" in str(e):
-                    job.status = JobStatus.HITL_REVIEW.value
-                else:
-                    job.status = JobStatus.FAILED.value
-                job.errors = job.errors + [str(e)] if job.errors else [str(e)]
-                await session.commit()
+                if job is not None:
+                    if getattr(e, 'is_hitl', False) or "HITL review required" in str(e):
+                        job.status = JobStatus.HITL_REVIEW.value
+                    else:
+                        job.status = JobStatus.FAILED.value
+                    job.errors = (job.errors or []) + [str(e)[:500]]
+                    await session.commit()

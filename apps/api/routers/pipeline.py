@@ -39,13 +39,11 @@ def get_pipeline():
 
 @router.post("", response_model=JobResponse)
 async def create_job(req: JobCreate, background_tasks: BackgroundTasks, current_user: User = Depends(check_permission(Permission.CREATE_JOB)), session: AsyncSession = Depends(get_session)):
-    stmt = select(TenantModel).where(TenantModel.id == req.tenant_id)
-    tenant = (await session.execute(stmt)).scalars().first()
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-    
+    # The tenant always comes from the authenticated user, never from the request body.
+    if req.tenant_id is not None and req.tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant mismatch")
     job = SyncJobModel(
-        tenant_id=req.tenant_id,
+        tenant_id=current_user.tenant_id,
         source_video_url=req.source_video_url,
         source_language=req.source_language,
         target_language=req.target_language,
@@ -56,7 +54,7 @@ async def create_job(req: JobCreate, background_tasks: BackgroundTasks, current_
     await session.refresh(job)
 
     pipeline = get_pipeline()
-    background_tasks.add_task(pipeline.run_pipeline, job.id, req.voice_profile_id)
+    background_tasks.add_task(pipeline.run_pipeline, job.id, req.voice_profile_id, current_user.tenant_id)
 
     return job
 
@@ -73,13 +71,15 @@ async def get_job(job_id: str, current_user: User = Depends(check_permission(Per
 
 @router.get("/tenant/{tenant_id}")
 async def list_jobs(tenant_id: UUID, current_user: User = Depends(check_permission(Permission.READ_JOB)), session: AsyncSession = Depends(get_session)):
+    if tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant mismatch")
     stmt = select(SyncJobModel).where(SyncJobModel.tenant_id == tenant_id)
     result = await session.execute(stmt)
     return JobListResponse(jobs=[j async for j in result.scalars])
 
 
 @router.post("/{job_id}/qa")
-async def run_qa(job_id: str, session: AsyncSession = Depends(get_session)):
+async def run_qa(job_id: str, current_user: User = Depends(check_permission(Permission.UPDATE_JOB)), session: AsyncSession = Depends(get_session)):
     pipeline = get_pipeline()
     job = await session.get(SyncJobModel, job_id)
     if not job or not job.final_video or not job.translation:
@@ -93,7 +93,7 @@ async def run_qa(job_id: str, session: AsyncSession = Depends(get_session)):
 
 
 @router.get("/{job_id}/qa-report")
-async def get_qa_report(job_id: str, session: AsyncSession = Depends(get_session)):
+async def get_qa_report(job_id: str, current_user: User = Depends(check_permission(Permission.READ_JOB)), session: AsyncSession = Depends(get_session)):
     stmt = select(SyncJobModel).where(SyncJobModel.id == job_id)
     result = await session.execute(stmt)
     job = result.scalars().first()
@@ -105,7 +105,7 @@ async def get_qa_report(job_id: str, session: AsyncSession = Depends(get_session
 
 
 @router.post("/{job_id}/cancel")
-async def cancel_job(job_id: str, session: AsyncSession = Depends(get_session)):
+async def cancel_job(job_id: str, current_user: User = Depends(check_permission(Permission.CANCEL_JOB)), session: AsyncSession = Depends(get_session)):
     """Cancel a running job."""
     # In production: check Celery task status and revoke
     return {"status": "cancelled", "job_id": job_id}

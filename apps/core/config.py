@@ -5,6 +5,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql+asyncpg://user:pass@localhost:5432/seriessync")
+    ENV: str = os.getenv("ENV", "development")
     JWT_SECRET: str = os.getenv("JWT_SECRET", "dev-secret-change-me")
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRATION_HOURS: int = 24
@@ -24,3 +25,5 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+if settings.ENV != "development" and (settings.JWT_SECRET == "dev-secret-change-me" or len(settings.JWT_SECRET) < 32):
+    raise RuntimeError("JWT_SECRET must be set (>= 32 chars) outside development")

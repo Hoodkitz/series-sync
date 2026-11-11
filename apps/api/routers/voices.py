@@ -18,12 +18,10 @@ router = APIRouter(prefix="/voices", tags=["voices"])
 
 @router.post("")
 async def create_voice(req: VoiceCreate, current_user: User = Depends(check_permission(Permission.CREATE_VOICE)), session: AsyncSession = Depends(get_session)):
-    tenant = (await session.execute(select(TenantModel).where(TenantModel.id == req.tenant_id))).scalars().first()
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-    
+    if req.tenant_id is not None and req.tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant mismatch")
     db = VoiceProfileModel(
-        tenant_id=req.tenant_id,
+        tenant_id=current_user.tenant_id,
         speaker_name=req.speaker_name,
         voice_preset=req.voice_preset,
         language=req.language,
@@ -53,6 +51,8 @@ async def get_voice(voice_id: UUID, current_user: User = Depends(check_permissio
 
 @router.get("/tenant/{tenant_id}")
 async def list_voices(tenant_id: UUID, current_user: User = Depends(check_permission(Permission.READ_VOICE)), session: AsyncSession = Depends(get_session)):
+    if tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="Tenant mismatch")
     stmt = select(VoiceProfileModel).where(VoiceProfileModel.tenant_id == tenant_id)
     result = await session.execute(stmt)
     return VoiceListResponse(voices=[v async for v in result.scalars])
