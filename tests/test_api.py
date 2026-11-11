@@ -155,3 +155,20 @@ def test_stock_voice(client):
     assert r.status_code == 201 and not r.json()["cloned"]
     r = client.post("/voices", headers=h, json={"speaker_name": "x", "voice_preset": "../../x", "consent": True})
     assert r.status_code == 422
+
+def test_frontend_serving(client):
+    # Root redirects to /app/
+    r = client.get("/", follow_redirects=False)
+    assert r.status_code == 307
+    assert r.headers["location"] == "/app/"
+    
+    # /api-info returns JSON
+    r = client.get("/api-info")
+    assert r.status_code == 200
+    assert r.json()["service"] == "Series Sync SaaS"
+    
+    # /app/ serves HTML
+    r = client.get("/app/")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "Series Sync" in r.text
