@@ -18,6 +18,7 @@ class JobStatus(str, Enum):
     RENDERING = "rendering"
     COMPLETED = "completed"
     FAILED = "failed"
+    HITL_REVIEW = "hitl_review"
 
 
 class QualityScore(str, Enum):

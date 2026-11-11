@@ -39,6 +39,7 @@ class SyncJob(Base):
     status = Column(String(50), default="uploaded")
     source_video_url = Column(Text, nullable=False)
     output_video_url = Column(Text, nullable=True)
+    voice_profile_id = Column(UUID(as_uuid=True), ForeignKey('voice_profiles.id'), nullable=True)
     rights = Column(Boolean, nullable=False, default=False, server_default="false")
     quality_score = Column(Float, nullable=True)
     qa_report = Column(JSON, nullable=True)

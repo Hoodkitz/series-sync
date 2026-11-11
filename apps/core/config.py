@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     ELEVENLABS_API_KEY: str = os.getenv("ELEVENLABS_API_KEY", "")
     DEEP_LINGUISTIC_API_KEY: str = os.getenv("DEEP_LINGUISTIC_API_KEY", "")
     WHISPER_MODEL: str = os.getenv("WHISPER_MODEL", "base")
+    OPENAI_BASE_URL: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-3.5-turbo")
     OUTPUT_DIR: str = os.getenv("OUTPUT_DIR", "/tmp/series-sync")
     CHECKPOINT_DIR: str = os.getenv("CHECKPOINT_DIR", "/tmp/checkpoints")
 
