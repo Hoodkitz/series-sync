@@ -9,13 +9,14 @@ app = FastAPI(title="Series Sync SaaS", version="1.0.0", docs_url="/docs")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS.split(","),
-    allow_credentials=True,
+    allow_origins=[o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()],
+    allow_credentials=False,  # bearer tokens, no cookies
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(auth.router)
+app.include_router(pipeline.uploads)
 app.include_router(pipeline.router)
 app.include_router(voices.router)
 app.include_router(stats.router)

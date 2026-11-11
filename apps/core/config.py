@@ -16,9 +16,17 @@ class Settings(BaseSettings):
     WHISPER_MODEL: str = os.getenv("WHISPER_MODEL", "base")
     OPENAI_BASE_URL: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-3.5-turbo")
-    OUTPUT_DIR: str = os.getenv("OUTPUT_DIR", "/tmp/series-sync")
-    CHECKPOINT_DIR: str = os.getenv("CHECKPOINT_DIR", "/tmp/checkpoints")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    ASR_MODEL: str = os.getenv("ASR_MODEL", "whisper-1")
+    ELEVENLABS_MODEL: str = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")
+    TTS_DEFAULT_VOICE: str = os.getenv("TTS_DEFAULT_VOICE", "pNInz6obpgDQGcFmaJgB")  # ElevenLabs stock voice
+    TTS_CONCURRENCY: int = int(os.getenv("TTS_CONCURRENCY", "4"))
+    # fake = deterministic local providers (dev/tests); real = OpenAI-compatible ASR/LLM + ElevenLabs
+    PROVIDER_MODE: str = os.getenv("PROVIDER_MODE", "real")
+    STORAGE_DIR: str = os.getenv("STORAGE_DIR", "./var/storage")
+    MAX_UPLOAD_MB: int = int(os.getenv("MAX_UPLOAD_MB", "4096"))
+    MAX_DURATION_MINUTES: int = int(os.getenv("MAX_DURATION_MINUTES", "90"))
+    BACKGROUND_VOLUME: float = float(os.getenv("BACKGROUND_VOLUME", "0.18"))
 
     class Config:
         env_file = ".env"
@@ -27,3 +35,8 @@ class Settings(BaseSettings):
 settings = Settings()
 if settings.ENV != "development" and (settings.JWT_SECRET == "dev-secret-change-me" or len(settings.JWT_SECRET) < 32):
     raise RuntimeError("JWT_SECRET must be set (>= 32 chars) outside development")
+if settings.ENV != "development" and settings.PROVIDER_MODE == "fake":
+    raise RuntimeError("PROVIDER_MODE=fake is only allowed with ENV=development")
+if settings.PROVIDER_MODE == "real" and settings.ENV != "development" and not (
+        settings.OPENAI_API_KEY and settings.ELEVENLABS_API_KEY):
+    raise RuntimeError("OPENAI_API_KEY and ELEVENLABS_API_KEY are required for PROVIDER_MODE=real")

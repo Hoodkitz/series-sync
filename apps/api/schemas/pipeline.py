@@ -1,6 +1,6 @@
 """Pydantic schemas for Series Sync pipeline."""
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from uuid import UUID
 from datetime import datetime
 from enum import Enum
@@ -8,107 +8,76 @@ from apps.core.models import JobStatus, QualityScore
 
 
 class JobCreate(BaseModel):
-    idempotency_key: Optional[str] = None  # same key + same tenant -> the existing job is returned
-    rights: bool
-    voice_profile_id: UUID
-    tenant_id: Optional[UUID] = None  # ignored: tenant comes from the token
-    source_video_url: str
-    source_language: str = "en"
-    target_language: str = "de"
+    upload_id: UUID
+    rights: bool = Field(description="Customer confirms it holds the rights to dub this content")
+    voice_profile_id: Optional[UUID] = None  # None = stock voice
+    source_language: str = Field("auto", pattern=r"^(auto|[a-z]{2})$")
+    target_language: str = Field("de", pattern=r"^[a-z]{2}$")
+    title: Optional[str] = Field(None, max_length=255)
+    background_volume: Optional[float] = Field(None, ge=0.0, le=1.0)
+    idempotency_key: Optional[str] = Field(None, max_length=255)
+
+
+class UploadResponse(BaseModel):
+    upload_id: UUID
+    filename: str
+    size_bytes: int
+    duration_seconds: float
+
+
+class SegmentEdit(BaseModel):
+    translation: str = Field(min_length=0, max_length=2000)
 
 
 class JobResponse(BaseModel):
-    id: str
-    tenant_id: Optional[UUID] = None  # ignored: tenant comes from the token
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    title: str | None = None
     source_language: str
     target_language: str
     status: str
-    source_video_url: str
-    output_video_url: str | None
-    quality_score: float | None
-    qa_report: dict | None
-    source_audio: str | None
-    transcription: str | None
-    translation: str | None
-    tts_audio: str | None
-    final_video: str | None
-    errors: list[str]
+    output_video_url: str | None = None
+    voice_profile_id: UUID | None = None
+    quality_score: float | None = None
+    qa_report: dict | None = None
+    duration_seconds: float | None = None
+    transcription: str | None = None
+    translation: str | None = None
+    errors: list[str] = Field(default_factory=list)
     created_at: datetime
-    completed_at: datetime | None
+    completed_at: datetime | None = None
 
-    class Config:
-        from_attributes = True
+    @field_validator("errors", mode="before")
+    @classmethod
+    def _none_is_empty(cls, v):
+        return v or []
 
 
 class JobListResponse(BaseModel):
     jobs: list[JobResponse]
 
 
-class StageAdvance(BaseModel):
-    stage: str
-
-
-class StageResponse(BaseModel):
-    id: str
-    tenant_id: Optional[UUID] = None  # ignored: tenant comes from the token
-    status: str
-    source_language: str
-    target_language: str
-    source_video_url: str
-    output_video_url: str | None
-    quality_score: float | None
-    created_at: datetime
-    completed_at: datetime | None
-    errors: list[str]
-
-    class Config:
-        from_attributes = True
-
-
-class QAReportCreate(BaseModel):
-    job_id: str
-    lip_sync_score: float = Field(ge=0.0, le=1.0)
-    audio_quality_score: float = Field(ge=0.0, le=1.0)
-    translation_accuracy_score: float = Field(ge=0.0, le=1.0)
-    overall_pass: bool
-    issues: list[str] = Field(default_factory=list)
-    notes: str | None = None
-
-
-class QAReportResponse(BaseModel):
-    job_id: str
-    lip_sync_score: float
-    audio_quality_score: float
-    translation_accuracy_score: float
-    overall_pass: bool
-    issues: list[str]
-    notes: str | None
-
-
 class VoiceCreate(BaseModel):
-    consent: bool
-    tenant_id: Optional[UUID] = None  # ignored: tenant comes from the token
-    speaker_name: str
-    voice_preset: str
-    language: str = "de"
-    reference_audio_url: str
-    embedding: bytes | None = None
+    """Register a stock/provider voice by id (no voice cloning)."""
+    speaker_name: str = Field(min_length=1, max_length=255)
+    voice_preset: str = Field(pattern=r"^[A-Za-z0-9]{8,64}$", description="Provider voice id")
+    language: str = Field("de", pattern=r"^[a-z]{2}$")
+    consent: bool = Field(description="Licence/consent for this voice is documented")
     is_default: bool = False
 
 
 class VoiceResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: UUID
-    tenant_id: Optional[UUID] = None  # ignored: tenant comes from the token
     speaker_name: str
     voice_preset: str
     language: str
-    reference_audio_url: str
-    embedding: bytes | None
+    consent: bool
+    cloned: bool = False
     is_default: bool
     created_at: datetime
-
-    class Config:
-        from_attributes = True
 
 
 class VoiceListResponse(BaseModel):
@@ -116,7 +85,9 @@ class VoiceListResponse(BaseModel):
 
 
 class StatsResponse(BaseModel):
-    tenant_id: str
-    completed_jobs: int
     total_jobs: int
-    jobs: list[dict]
+    completed_jobs: int
+    in_review: int
+    failed: int
+    processing: int
+    minutes_dubbed: float

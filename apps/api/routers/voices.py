@@ -1,114 +1,128 @@
-"""Voice profile management endpoints."""
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from uuid import UUID
+"""Voice profiles: stock voices by provider id, or consented voice clones from a reference recording."""
+from __future__ import annotations
 
-from apps.api.security.auth import get_current_active_user
+import logging
+from pathlib import Path
+from uuid import UUID, uuid4
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from apps.api.schemas.pipeline import VoiceCreate, VoiceListResponse, VoiceResponse
 from apps.api.security.permissions import check_permission
 from apps.core.permissions import Permission
-from apps.db.models import User
-
-from apps.api.schemas.pipeline import VoiceCreate, VoiceResponse, VoiceListResponse
+from apps.db.models import SyncJob, User, VoiceProfile
 from apps.db.session import get_session
-from apps.db.models import VoiceProfile as VoiceProfileModel, Tenant as TenantModel
+from apps.media import ffmpeg, storage
+from apps.services.providers import ProviderError, default_providers
 
+log = logging.getLogger("seriessync.voices")
 router = APIRouter(prefix="/voices", tags=["voices"])
+MAX_SAMPLE_MB = 25
 
 
-@router.post("")
-async def create_voice(req: VoiceCreate, current_user: User = Depends(check_permission(Permission.CREATE_VOICE)), session: AsyncSession = Depends(get_session)):
-    if req.tenant_id is not None and req.tenant_id != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail="Tenant mismatch")
-    db = VoiceProfileModel(
-        tenant_id=current_user.tenant_id,
-        speaker_name=req.speaker_name,
-        voice_preset=req.voice_preset,
-        language=req.language,
-        reference_audio_url=req.reference_audio_url,
-        embedding=req.embedding,
-        is_default=req.is_default,
-        consent=req.consent,
-    )
-    session.add(db)
+def _out(v: VoiceProfile) -> VoiceResponse:
+    r = VoiceResponse.model_validate(v)
+    r.cloned = bool(v.reference_audio_url)
+    return r
+
+
+async def _voice(session: AsyncSession, voice_id: UUID, user: User) -> VoiceProfile:
+    v = (await session.execute(select(VoiceProfile).where(VoiceProfile.id == voice_id,
+                                                          VoiceProfile.tenant_id == user.tenant_id))).scalars().first()
+    if not v:
+        raise HTTPException(404, "Voice not found")
+    return v
+
+
+@router.post("", response_model=VoiceResponse, status_code=201)
+async def create_voice(req: VoiceCreate, user: User = Depends(check_permission(Permission.CREATE_VOICE)),
+                       session: AsyncSession = Depends(get_session)):
+    v = VoiceProfile(tenant_id=user.tenant_id, speaker_name=req.speaker_name, voice_preset=req.voice_preset,
+                     language=req.language, reference_audio_url="", is_default=req.is_default, consent=req.consent)
+    session.add(v)
     await session.commit()
-    await session.refresh(db)
-    return db
+    await session.refresh(v)
+    return _out(v)
 
 
-@router.get("/{voice_id}")
-async def get_voice(voice_id: UUID, current_user: User = Depends(check_permission(Permission.READ_VOICE)), session: AsyncSession = Depends(get_session)):
-    stmt = select(VoiceProfileModel).where(VoiceProfileModel.id == voice_id)
-    result = await session.execute(stmt)
-    voice = result.scalars().first()
-    if not voice:
-        raise HTTPException(status_code=404, detail="Voice not found")
+@router.post("/clone", response_model=VoiceResponse, status_code=201)
+async def clone_voice(speaker_name: str = Form(..., min_length=1, max_length=255),
+                      consent: bool = Form(...), language: str = Form("de", pattern=r"^[a-z]{2}$"),
+                      sample: UploadFile = File(...),
+                      user: User = Depends(check_permission(Permission.CREATE_VOICE)),
+                      session: AsyncSession = Depends(get_session)):
+    """Clone a voice. Requires documented consent of the speaker (GDPR Art. 9 biometric data, EU AI Act Art. 50)."""
+    if not consent:
+        raise HTTPException(422, "Voice cloning requires the speaker's documented consent")
+    ext = Path(sample.filename or "").suffix.lower()
+    if ext not in storage.ALLOWED_AUDIO_EXT:
+        raise HTTPException(415, "Unsupported audio type")
+    data = await sample.read(MAX_SAMPLE_MB * 1024 * 1024 + 1)
+    if len(data) > MAX_SAMPLE_MB * 1024 * 1024:
+        raise HTTPException(413, f"Sample larger than {MAX_SAMPLE_MB} MB")
+    dst = storage.voices_dir(user.tenant_id) / f"{uuid4()}{ext}"
+    dst.write_bytes(data)
+    try:
+        info = await ffmpeg.media_info(dst)
+        if not info["has_audio"] or info["duration"] < 10:
+            raise HTTPException(422, "Sample must contain at least 10 seconds of clear speech")
+        voice_id = await default_providers().cloner.clone(speaker_name, dst)
+    except ffmpeg.MediaError:
+        dst.unlink(missing_ok=True)
+        raise HTTPException(422, "Sample is not a readable audio file")
+    except ProviderError as e:
+        dst.unlink(missing_ok=True)
+        raise HTTPException(502, f"Voice cloning failed: {e}")
+    except BaseException:
+        dst.unlink(missing_ok=True)
+        raise
+    v = VoiceProfile(tenant_id=user.tenant_id, speaker_name=speaker_name, voice_preset=voice_id, language=language,
+                     reference_audio_url=str(dst), consent=True)
+    session.add(v)
+    await session.commit()
+    await session.refresh(v)
+    return _out(v)
 
-    if current_user and voice.tenant_id != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail="Not authorized to modify this voice profile")
-    return voice
+
+@router.get("", response_model=VoiceListResponse)
+async def list_voices(user: User = Depends(check_permission(Permission.READ_VOICE)),
+                      session: AsyncSession = Depends(get_session)):
+    rows = (await session.execute(select(VoiceProfile).where(VoiceProfile.tenant_id == user.tenant_id)
+                                  .order_by(VoiceProfile.created_at))).scalars().all()
+    return VoiceListResponse(voices=[_out(v) for v in rows])
 
 
-@router.get("/tenant/{tenant_id}")
-async def list_voices(tenant_id: UUID, current_user: User = Depends(check_permission(Permission.READ_VOICE)), session: AsyncSession = Depends(get_session)):
-    if tenant_id != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail="Tenant mismatch")
-    stmt = select(VoiceProfileModel).where(VoiceProfileModel.tenant_id == tenant_id)
-    result = await session.execute(stmt)
-    return VoiceListResponse(voices=[v async for v in result.scalars])
+@router.get("/{voice_id}", response_model=VoiceResponse)
+async def get_voice(voice_id: UUID, user: User = Depends(check_permission(Permission.READ_VOICE)),
+                    session: AsyncSession = Depends(get_session)):
+    return _out(await _voice(session, voice_id, user))
+
 
 @router.delete("/{voice_id}/consent")
-async def revoke_consent(voice_id: UUID, current_user: User = Depends(check_permission(Permission.DELETE_VOICE)), session: AsyncSession = Depends(get_session)):
-    stmt = select(VoiceProfileModel).where(VoiceProfileModel.id == voice_id)
-    result = await session.execute(stmt)
-    voice = result.scalars().first()
-    if not voice:
-        raise HTTPException(status_code=404, detail="Voice not found")
-
-    if current_user and voice.tenant_id != current_user.tenant_id:
-        raise HTTPException(status_code=403, detail="Not authorized to modify this voice profile")
-
-    # 1. We must delete any TTS artifacts from Jobs that used this voice
-    from apps.db.models import SyncJob
-    import os
-
-    jobs_stmt = select(SyncJob).where(SyncJob.voice_profile_id == voice_id)
-    jobs_result = await session.execute(jobs_stmt)
-
-    for job in jobs_result.scalars():
-        if job.tts_audio and os.path.exists(job.tts_audio):
-            try:
-                os.remove(job.tts_audio)
-            except OSError:
-                pass
-        job.tts_audio = None
-
-        if job.final_video and os.path.exists(job.final_video):
-            try:
-                os.remove(job.final_video)
-            except OSError:
-                pass
-        job.final_video = None
-
-        if job.output_video_url and os.path.exists(job.output_video_url):
-            try:
-                os.remove(job.output_video_url)
-            except OSError:
-                pass
-        job.output_video_url = None
-
-        # If there are other derived artifacts like final_video they might need deletion or metadata scrub
-        # We'll just delete tts_audio per requirements: "all derived TTS artifacts"
-
-    # 2. Delete the reference audio if it exists locally
-    if voice.reference_audio_url and os.path.exists(voice.reference_audio_url):
+async def revoke_consent(voice_id: UUID, user: User = Depends(check_permission(Permission.DELETE_VOICE)),
+                         session: AsyncSession = Depends(get_session)):
+    """Consent withdrawn: delete the voice, its reference recording, the provider clone and every dub made with it."""
+    voice = await _voice(session, voice_id, user)
+    jobs = (await session.execute(select(SyncJob).where(SyncJob.voice_profile_id == voice.id,
+                                                        SyncJob.tenant_id == user.tenant_id))).scalars().all()
+    for job in jobs:
+        storage.delete_job_files(job.tenant_id, job.id)
+        job.tts_audio = job.final_video = job.output_video_url = None
+        job.segments = [{k: v for k, v in s.items() if k in ("start", "end", "text", "translation")}
+                        for s in (job.segments or [])]
+        job.voice_profile_id = None
+        job.status = "failed"
+        job.errors = (job.errors or []) + ["voice consent revoked: dub deleted"]
+    ref = storage.inside_tenant(user.tenant_id, voice.reference_audio_url)
+    if ref and ref.exists():
+        ref.unlink()
+    if voice.reference_audio_url:  # only clones live at the provider; stock voices are shared and must stay
         try:
-            os.remove(voice.reference_audio_url)
-        except OSError:
-            pass
-
-    # 3. Delete the voice profile itself
+            await default_providers().cloner.delete(voice.voice_preset)
+        except ProviderError as e:  # keep going: local data is gone; provider deletion is logged for follow-up
+            log.error("provider voice %s not deleted: %s", voice.voice_preset, e)
     await session.delete(voice)
     await session.commit()
-
-    return {"status": "success", "message": "Consent revoked, profile and artifacts deleted"}
+    return {"status": "deleted", "jobs_affected": len(jobs)}

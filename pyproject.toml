@@ -1,31 +1,23 @@
 [project]
 name = "series-sync"
-version = "0.1.0"
-description = "Automate Dubbing und Synchronisation von Serien/Filmen"
+version = "1.0.0"
+description = "Automatisches Dubbing und Synchronisation von Serien/Filmen"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi",
     "uvicorn[standard]",
     "sqlalchemy[asyncio]",
     "asyncpg",
-    "pydantic[dotenv]",
-    "python-jose[cryptography]",
-    "passlib[bcrypt]",
-    "httpx",
-    "redis",
-    "python-multipart",
-    "python-dotenv",
+    "aiosqlite",
     "alembic",
-    "celery",
-    "numpy",
-    "deep-translator",
-    "elevenlabs",
-    "openai",
-    "pydub",
+    "pydantic[email]",
     "pydantic-settings",
-    "aiofiles",
-    "aiohttp",
+    "python-jose[cryptography]",
+    "passlib[argon2]",
     "argon2-cffi",
+    "httpx",
+    "python-multipart",
+    "numpy",
 ]
 
 [build-system]

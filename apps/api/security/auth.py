@@ -9,7 +9,7 @@ import sqlalchemy as sa
 from uuid import UUID
 
 from apps.core.config import settings
-from apps.db.session import get_session
+from apps.db.session import get_session, set_tenant_context
 from apps.db.models import User, Tenant
 
 pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
@@ -45,21 +45,11 @@ async def get_current_user(token: str = Depends(oauth2_scheme), session: AsyncSe
         raise credentials_exception
 
     # RLS context from the signed claim first; the row must then also belong to that tenant.
-    await session.execute(
-        sa.text("SELECT set_config('app.current_tenant', :tenant_id, true)") if session.bind.dialect.name == "postgresql"
-        else sa.text("SELECT 1"), {"tenant_id": str(tenant_claim)} if session.bind.dialect.name == "postgresql" else {})
+    await set_tenant_context(session, tenant_claim)
     result = await session.execute(select(User).where(User.id == user_id, User.tenant_id == tenant_claim))
     user = result.scalars().first()
     if user is None:
         raise credentials_exception
-
-    # Set the current tenant for RLS in this session
-    # SET LOCAL cannot take bind parameters; set_config(..., is_local=true) is transaction-scoped
-    await session.execute(
-        sa.text("SELECT set_config('app.current_tenant', :tenant_id, true)"),
-        {"tenant_id": str(user.tenant_id)}
-    )
-
     return user
 
 async def get_current_active_user(current_user: User = Depends(get_current_user)):

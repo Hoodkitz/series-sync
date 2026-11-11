@@ -27,13 +27,9 @@ class Role(str, Enum):
 PERMISSIONS: dict[Role, set[str]] = {
     Role.USER: {
         Permission.READ_JOB, Permission.CREATE_JOB, Permission.UPDATE_JOB,
-        Permission.UPLOAD_FILE, Permission.EXPORT,
+        Permission.UPLOAD_FILE, Permission.EXPORT, Permission.READ_VOICE,
     },
-    Role.ADMIN: {
-        Permission.READ_JOB, Permission.CREATE_JOB, Permission.UPDATE_JOB,
-        Permission.CANCEL_JOB, Permission.UPLOAD_FILE, Permission.EXPORT,
-        Permission.EXPORT_QA,
-    },
+    Role.ADMIN: set(Permission),  # tenant owner: everything inside the own tenant
     Role.AGENT: {
         Permission.READ_JOB, Permission.CREATE_JOB, Permission.UPDATE_JOB,
         Permission.READ_VOICE, Permission.CREATE_VOICE, Permission.UPDATE_VOICE,

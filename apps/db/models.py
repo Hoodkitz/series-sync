@@ -52,6 +52,10 @@ class SyncJob(Base):
     final_video = Column(Text, nullable=True)
     errors = Column(JSON, default=list)
     idempotency_key = Column(String(255), nullable=True)
+    segments = Column(JSON, nullable=True)            # per-line timestamps, text, translation, dub audio, fit info
+    duration_seconds = Column(Float, nullable=True)
+    background_volume = Column(Float, nullable=True)  # original soundtrack level under the dub (0..1)
+    title = Column(String(255), nullable=True)
 
     tenant = relationship("Tenant", back_populates="sync_jobs")
 
