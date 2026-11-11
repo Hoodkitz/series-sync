@@ -32,8 +32,8 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_users_email'), 'users', ['email'], unique=True)
-    op.add_column('sync_jobs', sa.Column('rights', sa.Boolean(), nullable=False))
-    op.add_column('voice_profiles', sa.Column('consent', sa.Boolean(), nullable=False))
+    op.add_column('sync_jobs', sa.Column('rights', sa.Boolean(), nullable=False, server_default=sa.false()))
+    op.add_column('voice_profiles', sa.Column('consent', sa.Boolean(), nullable=False, server_default=sa.false()))
     # ### end Alembic commands ###
 
 

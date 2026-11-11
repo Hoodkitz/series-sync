@@ -103,8 +103,18 @@ async def get_voice(voice_id: UUID, user: User = Depends(check_permission(Permis
 @router.delete("/{voice_id}/consent")
 async def revoke_consent(voice_id: UUID, user: User = Depends(check_permission(Permission.DELETE_VOICE)),
                          session: AsyncSession = Depends(get_session)):
-    """Consent withdrawn: delete the voice, its reference recording, the provider clone and every dub made with it."""
+    """Consent withdrawn: delete the voice, its reference recording, the provider clone and every dub made with it.
+
+    Stock voices carry no personal data: they are only removed from the list; existing dubs stay untouched."""
     voice = await _voice(session, voice_id, user)
+    if not voice.reference_audio_url:
+        jobs = (await session.execute(select(SyncJob).where(SyncJob.voice_profile_id == voice.id,
+                                                            SyncJob.tenant_id == user.tenant_id))).scalars().all()
+        for job in jobs:
+            job.voice_profile_id = None
+        await session.delete(voice)
+        await session.commit()
+        return {"status": "deleted", "jobs_affected": 0}
     jobs = (await session.execute(select(SyncJob).where(SyncJob.voice_profile_id == voice.id,
                                                         SyncJob.tenant_id == user.tenant_id))).scalars().all()
     for job in jobs:

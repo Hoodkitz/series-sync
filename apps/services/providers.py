@@ -94,10 +94,10 @@ class OpenAIWhisperASR:
                     "timestamp_granularities[]": "segment"}
             if language:
                 data["language"] = language
-            with open(chunk, "rb") as fh:
-                r = await _post(f"{settings.OPENAI_BASE_URL}/audio/transcriptions",
-                                headers={"Authorization": f"Bearer {settings.OPENAI_API_KEY}"},
-                                data=data, files={"file": (chunk.name, fh, "audio/mpeg")})
+            audio = chunk.read_bytes()  # bytes, not a file handle: retries must resend the full file
+            r = await _post(f"{settings.OPENAI_BASE_URL}/audio/transcriptions",
+                            headers={"Authorization": f"Bearer {settings.OPENAI_API_KEY}"},
+                            data=data, files={"file": (chunk.name, audio, "audio/mpeg")})
             body = r.json()
             detected = detected or _lang_code(body.get("language", ""))
             for s in body.get("segments", []):
@@ -183,10 +183,9 @@ class ElevenLabsTTS:
 
 class ElevenLabsCloner:
     async def clone(self, name: str, sample: Path) -> str:
-        with open(sample, "rb") as fh:
-            r = await _post(f"{ElevenLabsTTS.BASE}/voices/add", headers={"xi-api-key": settings.ELEVENLABS_API_KEY},
-                            data={"name": name[:100], "remove_background_noise": "true"},
-                            files={"files": (sample.name, fh, "application/octet-stream")})
+        r = await _post(f"{ElevenLabsTTS.BASE}/voices/add", headers={"xi-api-key": settings.ELEVENLABS_API_KEY},
+                        data={"name": name[:100], "remove_background_noise": "true"},
+                        files={"files": (sample.name, sample.read_bytes(), "application/octet-stream")})
         voice_id = r.json().get("voice_id")
         if not voice_id:
             raise ProviderError("voice cloning returned no voice id")

@@ -167,7 +167,7 @@ class DubbingPipeline:
             await self._save_segments(session, job, segments)
 
         # 3. Dubbing translation (only lines that do not have one yet, e.g. after an edit reset)
-        todo = [i for i, s in enumerate(segments) if not s.get("translation")]
+        todo = [i for i, s in enumerate(segments) if not s.get("translation") and not s.get("edited")]
         if todo:
             await self._set_status(session, job, JobStatus.TRANSLATION)
             lines = await self.p.translator.translate([segments[i] for i in todo], job.source_language,

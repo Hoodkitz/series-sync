@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from uuid import UUID, uuid4
 
 from apps.db.session import get_session, set_login_email, set_tenant_context
@@ -13,8 +13,8 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 class UserCreate(BaseModel):
     email: EmailStr
-    password: str
-    tenant_name: str | None = None  # a registration always creates its own tenant (owner = admin)
+    password: str = Field(min_length=10, max_length=128)
+    tenant_name: str | None = Field(default=None, max_length=200)  # a registration always creates its own tenant (owner = admin)
 
 class Token(BaseModel):
     access_token: str
@@ -57,6 +57,9 @@ async def register(user_in: UserCreate, session: AsyncSession = Depends(get_sess
 
 @router.post("/token", response_model=Token)
 async def login(form_data: OAuth2PasswordRequestForm = Depends(), session: AsyncSession = Depends(get_session)):
+    if len(form_data.password) > 256 or len(form_data.username) > 320:  # bound the Argon2 work per request
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password",
+                            headers={"WWW-Authenticate": "Bearer"})
     await set_login_email(session, form_data.username)  # RLS: only this e-mail's row is visible for the lookup
     result = await session.execute(select(User).where(User.email == form_data.username))
     user = result.scalars().first()

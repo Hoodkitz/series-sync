@@ -13,8 +13,9 @@ const escapeHTML = (str) => {
 
 const STATUS = {uploaded: 'Wartet', preprocessing: 'Vorbereitung', transcription: 'Transkription',
     translation: 'Übersetzung', tts_generation: 'Sprachsynthese', lip_sync: 'Lip-Sync', rendering: 'Rendern',
-    qa_validation: 'Qualitätsprüfung', completed: 'Fertig', hitl_review: 'Prüfung nötig', failed: 'Fehlgeschlagen'};
-const ACTIVE = ['uploaded', 'preprocessing', 'transcription', 'tts_generation', 'lip_sync', 'rendering', 'qa_validation'];
+    qa_validation: 'Qualitätsprüfung', completed: 'Fertig', hitl_review: 'Prüfung nötig', failed: 'Fehlgeschlagen',
+    edited: 'Bearbeitet – neu rendern'};
+const ACTIVE = ['uploaded', 'preprocessing', 'transcription', 'translation', 'tts_generation', 'lip_sync', 'rendering', 'qa_validation'];
 
 // State
 let state = {
@@ -341,6 +342,7 @@ window.app = {
                 if (xhr.status === 200 || xhr.status === 201) {
                     const data = JSON.parse(xhr.responseText);
                     document.getElementById("uploadId").value = data.upload_id;
+                    state.formKey = crypto.randomUUID();  // one job per submitted form, even on double click
                     document.getElementById("uploadBtn").classList.add("hidden");
                     fileInput.disabled = true;
                     document.getElementById("jobDetailsForm").classList.remove("hidden");
@@ -376,6 +378,8 @@ window.app = {
         e.preventDefault();
         const uploadId = document.getElementById("uploadId").value;
         if (!uploadId) return;
+        const submitBtn = e.submitter || e.target.querySelector('button[type=submit]');
+        if (submitBtn) submitBtn.disabled = true;
         
         try {
             await apiCall("/jobs", {
@@ -386,7 +390,8 @@ window.app = {
                     target_language: document.getElementById("targetLanguage").value,
                     voice_profile_id: document.getElementById("voiceSelect").value || null,
                     background_volume: parseFloat(document.getElementById("bgVol").value),
-                    rights: document.getElementById("rightsConsent").checked
+                    rights: document.getElementById("rightsConsent").checked,
+                    idempotency_key: state.formKey
                 }
             });
             // Reset form
@@ -402,6 +407,8 @@ window.app = {
             window.app.loadStats();
         } catch (err) {
             alert(err.message);
+        } finally {
+            if (submitBtn) submitBtn.disabled = false;
         }
     },
     
@@ -483,7 +490,7 @@ window.app = {
                 `;
             }
             
-            if (job.qa_report && (job.status === 'hitl_review' || job.status === 'completed' || job.status === 'translation')) {
+            if (job.qa_report && ['hitl_review', 'completed', 'edited'].includes(job.status)) {
                 const qa = job.qa_report;
                 content += `
                     <div class="card">
@@ -493,14 +500,14 @@ window.app = {
                         ${qa.issues.length ? `<ul>${qa.issues.map(i => `<li>${escapeHTML(i)}</li>`).join('')}</ul>` : '<p>Keine automatisch erkannten Probleme.</p>'}
                     </div>`;
             }
-            if (['hitl_review', 'completed', 'translation'].includes(job.status)) {
+            if (['hitl_review', 'completed', 'edited'].includes(job.status)) {
                 const flagged = (job.qa_report && job.qa_report.lines_flagged) || [];
                 content += `
                     <div class="card">
                         <h3>Review & Bearbeitung</h3>
                         <div id="segmentsContainer">Lade Segmente...</div>
                         <div style="margin-top: 20px; display: flex; gap: 10px; flex-wrap: wrap;">
-                            <button onclick="window.app.renderJob('${job.id}')" ${job.status === 'translation' ? '' : 'disabled title="Erst eine Zeile ändern"'}>Neu rendern</button>
+                            <button onclick="window.app.renderJob('${job.id}')" ${job.status === 'edited' ? '' : 'disabled title="Erst eine Zeile ändern"'}>Neu rendern</button>
                             ${job.status === 'hitl_review' ? `<button onclick="window.app.approveJob('${job.id}')" style="background-color: var(--secondary-color); color: #000;">Freigeben</button>` : ''}
                         </div>
                     </div>

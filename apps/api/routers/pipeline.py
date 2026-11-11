@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -17,7 +18,7 @@ from apps.core.config import settings
 from apps.core.models import JobStatus
 from apps.core.permissions import Permission
 from apps.db.models import SyncJob, User, VoiceProfile
-from apps.db.session import AsyncSessionLocal, get_session
+from apps.db.session import AsyncSessionLocal, get_session, set_tenant_context
 from apps.media import ffmpeg, storage
 from apps.services.dubbing_pipeline import DubbingPipeline
 
@@ -100,7 +101,16 @@ async def create_job(req: JobCreate, background: BackgroundTasks,
                   background_volume=req.background_volume, title=req.title, status=JobStatus.UPLOADED.value,
                   errors=[])
     session.add(job)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:  # concurrent request with the same idempotency key won the race
+        await session.rollback()
+        await set_tenant_context(session, user.tenant_id)
+        existing = (await session.execute(select(SyncJob).where(
+            SyncJob.tenant_id == user.tenant_id, SyncJob.idempotency_key == req.idempotency_key))).scalars().first()
+        if existing is None:
+            raise
+        return existing
     await session.refresh(job)
     background.add_task(pipeline.run_pipeline, job.id, req.voice_profile_id, user.tenant_id)
     return job
@@ -144,6 +154,7 @@ async def edit_segment(job_id: UUID, index: int, req: SegmentEdit,
         raise HTTPException(404, "Line not found")
     seg = segments[index]
     seg["translation"] = req.translation.strip()
+    seg["edited"] = True  # never re-translated by the model (an empty line stays silent)
     for key in ("fitted", "tempo", "overrun", "dub_seconds", "slot"):
         seg.pop(key, None)
     job.segments = segments
@@ -151,7 +162,7 @@ async def edit_segment(job_id: UUID, index: int, req: SegmentEdit,
     job.translation = "\n".join(s.get("translation", "") for s in segments)
     job.final_video = None
     job.qa_report = None
-    job.status = JobStatus.TRANSLATION.value
+    job.status = JobStatus.EDITED.value
     await session.commit()
     return {"index": index, "translation": seg["translation"]}
 
@@ -162,7 +173,7 @@ async def render(job_id: UUID, background: BackgroundTasks,
                  session: AsyncSession = Depends(get_session), pipeline: DubbingPipeline = Depends(get_pipeline)):
     """Resume a failed job or re-render after edits; finished stages are reused, nothing is paid twice."""
     job = await _job(session, job_id, user)
-    if job.status in ACTIVE - {JobStatus.UPLOADED.value, JobStatus.TRANSLATION.value}:
+    if job.status in ACTIVE:
         raise HTTPException(409, "Job is still processing")
     if job.status in (JobStatus.COMPLETED.value, JobStatus.HITL_REVIEW.value) and job.final_video:
         raise HTTPException(409, "Nothing changed since the last render")
@@ -225,14 +236,15 @@ async def download(job_id: UUID, user: User = Depends(check_permission(Permissio
 async def delete_job(job_id: UUID, user: User = Depends(check_permission(Permission.CANCEL_JOB)),
                      session: AsyncSession = Depends(get_session)):
     job = await _job(session, job_id, user)
-    if job.status in ACTIVE - {JobStatus.UPLOADED.value}:
+    if job.status in ACTIVE:
         raise HTTPException(409, "Cancel the job before deleting it")
-    storage.delete_job_files(job.tenant_id, job.id)
     src = storage.resolve_source(job.tenant_id, job.source_video_url)
     other = (await session.execute(select(SyncJob.id).where(
         SyncJob.tenant_id == user.tenant_id, SyncJob.source_video_url == job.source_video_url,
         SyncJob.id != job.id))).first()
-    if src and not other:
-        os.remove(src)
+    tenant_id, jid = job.tenant_id, job.id
     await session.delete(job)
-    await session.commit()
+    await session.commit()  # row first: files of a deleted row are garbage, a row without files is a broken job
+    storage.delete_job_files(tenant_id, jid)
+    if src and not other:
+        src.unlink(missing_ok=True)

@@ -19,6 +19,7 @@ class JobStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     HITL_REVIEW = "hitl_review"
+    EDITED = "edited"  # lines corrected by a human, waiting for a re-render
 
 
 class QualityScore(str, Enum):

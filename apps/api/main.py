@@ -21,6 +21,19 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Series Sync SaaS", version="1.0.0", docs_url="/docs", lifespan=lifespan)
 
+@app.middleware("http")
+async def limit_upload_size(request, call_next):
+    """Reject oversized uploads before the multipart body is parsed and spooled to disk."""
+    if request.method == "POST" and request.url.path.startswith(("/uploads", "/voices/clone")):
+        from fastapi.responses import JSONResponse
+        length = request.headers.get("content-length")
+        if length is None:
+            return JSONResponse({"detail": "Content-Length required"}, status_code=411)
+        if not length.isdigit() or int(length) > settings.MAX_UPLOAD_MB * 1024 * 1024 + 1024 * 1024:
+            return JSONResponse({"detail": f"File larger than {settings.MAX_UPLOAD_MB} MB"}, status_code=413)
+    return await call_next(request)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()],

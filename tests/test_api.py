@@ -59,7 +59,7 @@ def test_full_flow(client, sample_video):
     # human edit of one line -> re-render only that line
     r = client.patch(f"/jobs/{job_id}/segments/0", headers=h, json={"translation": "Kurz."})
     assert r.status_code == 200
-    assert client.get(f"/jobs/{job_id}", headers=h).json()["status"] == "translation"
+    assert client.get(f"/jobs/{job_id}", headers=h).json()["status"] == "edited"
     r = client.post(f"/jobs/{job_id}/render", headers=h)
     assert r.status_code == 200
     job = client.get(f"/jobs/{job_id}", headers=h).json()
@@ -172,3 +172,33 @@ def test_frontend_serving(client):
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
     assert "Series Sync" in r.text
+
+
+def test_multi_line_edit_then_render(client, sample_video):
+    h = login(client, "multi@example.com")
+    up = upload(client, h, sample_video)
+    job_id = client.post("/jobs", headers=h, json={"upload_id": up, "rights": True}).json()["id"]
+    assert client.patch(f"/jobs/{job_id}/segments/0", headers=h, json={"translation": "Eins."}).status_code == 200
+    assert client.patch(f"/jobs/{job_id}/segments/1", headers=h, json={"translation": ""}).status_code == 200
+    assert client.get(f"/jobs/{job_id}", headers=h).json()["status"] == "edited"
+    assert client.post(f"/jobs/{job_id}/render", headers=h).status_code == 200
+    segs = client.get(f"/jobs/{job_id}/segments", headers=h).json()["segments"]
+    assert segs[0]["translation"] == "Eins." and segs[1]["translation"] == ""  # empty edit not re-translated
+    assert client.get(f"/jobs/{job_id}", headers=h).json()["status"] in ("completed", "hitl_review")
+
+
+def test_stock_voice_delete_keeps_dubs(client, sample_video):
+    h = login(client, "stockdel@example.com")
+    v = client.post("/voices", headers=h, json={"speaker_name": "S", "voice_preset": "pNInz6obpgDQGcFmaJgB",
+                                                "consent": True}).json()
+    up = upload(client, h, sample_video)
+    job_id = client.post("/jobs", headers=h, json={"upload_id": up, "rights": True, "voice_profile_id": v["id"]}).json()["id"]
+    assert client.delete(f"/voices/{v['id']}/consent", headers=h).json()["jobs_affected"] == 0
+    assert client.get(f"/jobs/{job_id}/output", headers=h).status_code == 200
+
+
+def test_upload_size_checked_before_parsing(client):
+    h = login(client, "big@example.com")
+    r = client.post("/uploads", headers={**h, "Content-Length": str(10**13), "Content-Type": "multipart/form-data; boundary=x"},
+                    content=b"--x--")
+    assert r.status_code == 413
