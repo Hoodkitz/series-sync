@@ -8,6 +8,7 @@ from apps.core.models import JobStatus, QualityScore
 
 
 class JobCreate(BaseModel):
+    idempotency_key: Optional[str] = None  # same key + same tenant -> the existing job is returned
     rights: bool
     voice_profile_id: UUID
     tenant_id: Optional[UUID] = None  # ignored: tenant comes from the token

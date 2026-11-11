@@ -19,3 +19,11 @@ async def set_tenant_context(session: AsyncSession, tenant_id) -> None:
         return
     from sqlalchemy import text
     await session.execute(text("SELECT set_config('app.current_tenant', :tid, true)"), {"tid": str(tenant_id)})
+
+
+async def set_login_email(session: AsyncSession, email: str) -> None:
+    """Opens the narrow users_login RLS hole for one transaction (no-op on SQLite)."""
+    if session.bind.dialect.name != "postgresql":
+        return
+    from sqlalchemy import text
+    await session.execute(text("SELECT set_config('app.login_email', :e, true)"), {"e": email})

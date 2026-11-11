@@ -51,6 +51,7 @@ class SyncJob(Base):
     tts_audio = Column(Text, nullable=True)
     final_video = Column(Text, nullable=True)
     errors = Column(JSON, default=list)
+    idempotency_key = Column(String(255), nullable=True)
 
     tenant = relationship("Tenant", back_populates="sync_jobs")
 

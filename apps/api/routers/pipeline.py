@@ -42,8 +42,15 @@ async def create_job(req: JobCreate, background_tasks: BackgroundTasks, current_
     # The tenant always comes from the authenticated user, never from the request body.
     if req.tenant_id is not None and req.tenant_id != current_user.tenant_id:
         raise HTTPException(status_code=403, detail="Tenant mismatch")
+    if req.idempotency_key:
+        existing = (await session.execute(select(SyncJobModel).where(
+            SyncJobModel.tenant_id == current_user.tenant_id,
+            SyncJobModel.idempotency_key == req.idempotency_key))).scalars().first()
+        if existing:
+            return existing
     job = SyncJobModel(
         tenant_id=current_user.tenant_id,
+        idempotency_key=req.idempotency_key,
         source_video_url=req.source_video_url,
         source_language=req.source_language,
         target_language=req.target_language,

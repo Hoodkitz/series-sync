@@ -40,10 +40,15 @@ async def get_current_user(token: str = Depends(oauth2_scheme), session: AsyncSe
     try:
         payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
         user_id = UUID(str(payload.get("sub")))
+        tenant_claim = UUID(str(payload.get("tenant_id")))
     except (JWTError, ValueError, TypeError):
         raise credentials_exception
 
-    result = await session.execute(select(User).where(User.id == user_id))
+    # RLS context from the signed claim first; the row must then also belong to that tenant.
+    await session.execute(
+        sa.text("SELECT set_config('app.current_tenant', :tenant_id, true)") if session.bind.dialect.name == "postgresql"
+        else sa.text("SELECT 1"), {"tenant_id": str(tenant_claim)} if session.bind.dialect.name == "postgresql" else {})
+    result = await session.execute(select(User).where(User.id == user_id, User.tenant_id == tenant_claim))
     user = result.scalars().first()
     if user is None:
         raise credentials_exception

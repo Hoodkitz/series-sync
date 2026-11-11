@@ -5,7 +5,7 @@ from sqlalchemy.future import select
 from pydantic import BaseModel, EmailStr
 from uuid import UUID
 
-from apps.db.session import get_session
+from apps.db.session import get_session, set_login_email
 from apps.db.models import User, Tenant
 from apps.api.security.auth import verify_password, get_password_hash, create_access_token, get_current_active_user
 
@@ -55,6 +55,7 @@ async def register(user_in: UserCreate, session: AsyncSession = Depends(get_sess
 
 @router.post("/token", response_model=Token)
 async def login(form_data: OAuth2PasswordRequestForm = Depends(), session: AsyncSession = Depends(get_session)):
+    await set_login_email(session, form_data.username)  # RLS: only this e-mail's row is visible for the lookup
     result = await session.execute(select(User).where(User.email == form_data.username))
     user = result.scalars().first()
     if not user or not verify_password(form_data.password, user.hashed_password):
