@@ -54,8 +54,12 @@ jobs:
         run: |
           DATABASE_URL=postgresql+asyncpg://owner:owner@localhost:5432/seriessync alembic upgrade head
           PGPASSWORD=owner psql -h localhost -U owner -d seriessync -c "CREATE ROLE app LOGIN PASSWORD 'app'; GRANT USAGE ON SCHEMA public TO app; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app;"
-      - name: RLS tests as app role
-        run: DATABASE_URL=postgresql+asyncpg://app:app@localhost:5432/seriessync pytest -q tests/test_rls.py
+      - name: alembic models in sync
+        run: DATABASE_URL=postgresql+asyncpg://owner:owner@localhost:5432/seriessync alembic check
+      - name: RLS + full API flow as app role
+        run: |
+          DATABASE_URL=postgresql+asyncpg://app:app@localhost:5432/seriessync pytest -q tests/test_rls.py
+          PG_TEST_APP_URL=postgresql+asyncpg://app:app@localhost:5432/seriessync PG_TEST_OWNER_URL=postgresql+asyncpg://owner:owner@localhost:5432/seriessync pytest -q tests/test_api.py
   docker:
     runs-on: ubuntu-latest
     timeout-minutes: 15

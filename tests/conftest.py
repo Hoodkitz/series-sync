@@ -4,6 +4,7 @@ import tempfile
 _tmp = tempfile.mkdtemp(prefix="seriessync-test-")
 os.environ.setdefault("ENV", "development")
 os.environ["PROVIDER_MODE"] = "fake"
+os.environ["DB_NULLPOOL"] = "1"
 os.environ["STORAGE_DIR"] = os.path.join(_tmp, "storage")
 # Postgres RLS tests run only when DATABASE_URL is given explicitly (CI service / local test DB).
 os.environ.setdefault("DATABASE_URL", f"sqlite+aiosqlite:///{_tmp}/app.db")
@@ -17,8 +18,22 @@ from apps.db.models import Base  # noqa: E402
 pytest_plugins = ("pytest_asyncio",)
 
 
+PG_APP = os.environ.get("PG_TEST_APP_URL")      # RLS-restricted app role (no owner rights)
+PG_OWNER = os.environ.get("PG_TEST_OWNER_URL")  # only used to empty the tables between tests
+
+
 @pytest_asyncio.fixture
 async def session_factory():
+    if PG_APP:
+        from sqlalchemy import text
+        owner = create_async_engine(PG_OWNER)
+        async with owner.begin() as conn:
+            await conn.execute(text("TRUNCATE " + ", ".join(t.name for t in Base.metadata.sorted_tables) + " CASCADE"))
+        await owner.dispose()
+        engine = create_async_engine(PG_APP, poolclass=__import__("sqlalchemy.pool").pool.NullPool)
+        yield async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        await engine.dispose()
+        return
     engine = create_async_engine(f"sqlite+aiosqlite:///{tempfile.mkdtemp(dir=_tmp)}/t.db", echo=False)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

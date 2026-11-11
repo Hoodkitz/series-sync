@@ -3,9 +3,9 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from pydantic import BaseModel, EmailStr
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from apps.db.session import get_session, set_login_email
+from apps.db.session import get_session, set_login_email, set_tenant_context
 from apps.db.models import User, Tenant
 from apps.api.security.auth import verify_password, get_password_hash, create_access_token, get_current_active_user
 
@@ -36,10 +36,12 @@ async def register(user_in: UserCreate, session: AsyncSession = Depends(get_sess
     Joining an existing tenant is an admin action, never a client-chosen tenant_id/role."""
     if len(user_in.password) < 10:
         raise HTTPException(status_code=422, detail="Password must have at least 10 characters")
+    await set_login_email(session, user_in.email)  # RLS: the duplicate check may see exactly this e-mail's row
     result = await session.execute(select(User).where(User.email == user_in.email))
     if result.scalars().first():
         raise HTTPException(status_code=400, detail="Email already registered")
-    tenant = Tenant(name=user_in.tenant_name or f"{user_in.email.split('@')[0]}'s workspace")
+    tenant = Tenant(id=uuid4(), name=user_in.tenant_name or f"{user_in.email.split('@')[0]}'s workspace")
+    await set_tenant_context(session, tenant.id)  # RLS: tenant + first user are written under the new tenant
     session.add(tenant)
     await session.flush()
     db_user = User(

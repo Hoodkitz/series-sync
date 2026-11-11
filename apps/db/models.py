@@ -1,5 +1,5 @@
 """SQLAlchemy models."""
-from sqlalchemy import Column, String, DateTime, Boolean, ForeignKey, JSON, Text, Integer, Float
+from sqlalchemy import UniqueConstraint, Column, String, DateTime, Boolean, ForeignKey, JSON, Text, Integer, Float
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
@@ -32,6 +32,7 @@ class User(Base):
 
 class SyncJob(Base):
     __tablename__ = "sync_jobs"
+    __table_args__ = (UniqueConstraint("tenant_id", "idempotency_key", name="uq_sync_jobs_tenant_idem"),)
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
     source_language = Column(String(50), default="en")
