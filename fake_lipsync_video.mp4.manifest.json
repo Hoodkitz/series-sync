@@ -1,0 +1,14 @@
+{
+  "ai_disclosure": true,
+  "models_used": [
+    "whisper",
+    "llm",
+    "tts",
+    "wav2lip"
+  ],
+  "actions": [
+    "translated",
+    "dubbed",
+    "lipsynced"
+  ]
+}

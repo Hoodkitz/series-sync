@@ -1,12 +1,34 @@
+
 import pytest_asyncio
 pytest_plugins = ("pytest_asyncio",)
 import pytest
 import asyncio
+import os
 from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from apps.db.models import Base, Tenant, SyncJob
 from apps.core.config import settings
+
+@pytest.fixture(autouse=True)
+def skip_if_no_postgres():
+    if "postgresql" not in settings.DATABASE_URL and "postgres" not in os.environ.get("DATABASE_URL", ""):
+        pytest.skip("Skipping RLS test: PostgreSQL not available")
+    # Check if network is enabled (for tests where we want no network)
+    if os.environ.get("NO_NETWORK") == "1":
+        pytest.skip("Skipping RLS test: NO_NETWORK=1")
+
+    # Check if we can reach the DB
+    import socket
+    if "localhost" in settings.DATABASE_URL or "127.0.0.1" in settings.DATABASE_URL:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1)
+        try:
+            s.connect(("127.0.0.1", 5432))
+            s.close()
+        except Exception:
+            pytest.skip("Skipping RLS test: PostgreSQL not reachable")
+
 
 @pytest_asyncio.fixture
 async def pg_session_factory():

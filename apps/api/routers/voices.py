@@ -45,6 +45,9 @@ async def get_voice(voice_id: UUID, current_user: User = Depends(check_permissio
     voice = result.scalars().first()
     if not voice:
         raise HTTPException(status_code=404, detail="Voice not found")
+
+    if current_user and voice.tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="Not authorized to modify this voice profile")
     return voice
 
 
@@ -53,3 +56,59 @@ async def list_voices(tenant_id: UUID, current_user: User = Depends(check_permis
     stmt = select(VoiceProfileModel).where(VoiceProfileModel.tenant_id == tenant_id)
     result = await session.execute(stmt)
     return VoiceListResponse(voices=[v async for v in result.scalars])
+
+@router.delete("/{voice_id}/consent")
+async def revoke_consent(voice_id: UUID, current_user: User = Depends(check_permission(Permission.DELETE_VOICE)), session: AsyncSession = Depends(get_session)):
+    stmt = select(VoiceProfileModel).where(VoiceProfileModel.id == voice_id)
+    result = await session.execute(stmt)
+    voice = result.scalars().first()
+    if not voice:
+        raise HTTPException(status_code=404, detail="Voice not found")
+
+    if current_user and voice.tenant_id != current_user.tenant_id:
+        raise HTTPException(status_code=403, detail="Not authorized to modify this voice profile")
+
+    # 1. We must delete any TTS artifacts from Jobs that used this voice
+    from apps.db.models import SyncJob
+    import os
+
+    jobs_stmt = select(SyncJob).where(SyncJob.voice_profile_id == voice_id)
+    jobs_result = await session.execute(jobs_stmt)
+
+    for job in jobs_result.scalars():
+        if job.tts_audio and os.path.exists(job.tts_audio):
+            try:
+                os.remove(job.tts_audio)
+            except OSError:
+                pass
+        job.tts_audio = None
+
+        if job.final_video and os.path.exists(job.final_video):
+            try:
+                os.remove(job.final_video)
+            except OSError:
+                pass
+        job.final_video = None
+
+        if job.output_video_url and os.path.exists(job.output_video_url):
+            try:
+                os.remove(job.output_video_url)
+            except OSError:
+                pass
+        job.output_video_url = None
+
+        # If there are other derived artifacts like final_video they might need deletion or metadata scrub
+        # We'll just delete tts_audio per requirements: "all derived TTS artifacts"
+
+    # 2. Delete the reference audio if it exists locally
+    if voice.reference_audio_url and os.path.exists(voice.reference_audio_url):
+        try:
+            os.remove(voice.reference_audio_url)
+        except OSError:
+            pass
+
+    # 3. Delete the voice profile itself
+    await session.delete(voice)
+    await session.commit()
+
+    return {"status": "success", "message": "Consent revoked, profile and artifacts deleted"}
