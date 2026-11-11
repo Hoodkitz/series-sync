@@ -37,6 +37,7 @@ class DubbingPipeline:
     def __init__(self, session_factory, providers: Providers | None = None):
         self.session_factory = session_factory
         self.p = providers or default_providers()
+        self._voices: dict[UUID, UUID] = {}  # job id -> voice profile used by the current run
 
     # ------------------------------------------------------------------ entry point
     async def run_pipeline(self, job_id: UUID, voice_profile_id: UUID | None = None,
@@ -49,6 +50,7 @@ class DubbingPipeline:
             await self._run(job_id, voice_profile_id, tenant_id)
         finally:
             _running.discard(job_id)
+            self._voices.pop(job_id, None)
 
     async def _run(self, job_id: UUID, voice_profile_id, tenant_id) -> None:
         from apps.db.session import set_tenant_context
@@ -81,15 +83,24 @@ class DubbingPipeline:
                     return await fail("Voice profile missing or no consent provided.")
                 job.voice_profile_id = voice.id
                 voice_id = voice.voice_preset
+                self._voices[job.id] = voice.id
 
             source = storage.resolve_source(job.tenant_id, job.source_video_url)
             if source is None:
                 return await fail("Source upload not found.")
-            workdir = storage.job_dir(job.tenant_id, job.id)
+            job_tenant = job.tenant_id
+            workdir = storage.job_dir(job_tenant, job.id)
 
             try:
                 await self._stages(session, job, source, workdir, voice_id)
             except PipelineAbort:
+                # Cancelled or consent revoked while running: nothing produced after that point may survive.
+                await session.rollback()
+                if tenant_id is not None:
+                    await set_tenant_context(session, tenant_id)
+                job = await session.get(SyncJob, job_id, populate_existing=True)
+                if job is None or any("consent revoked" in e for e in (job.errors or [])):
+                    storage.delete_job_files(job_tenant, job_id)
                 return
             except Exception as e:  # checkpointed: a retry resumes at the failed stage
                 log.exception("job %s failed", job_id)
@@ -103,10 +114,19 @@ class DubbingPipeline:
                     await session.commit()
 
     # ------------------------------------------------------------------ stages
-    async def _set_status(self, session, job: SyncJob, status: JobStatus) -> None:
-        await session.refresh(job, ["status", "errors"])
-        if job.status == JobStatus.FAILED.value and "cancelled by user" in (job.errors or []):
+    async def _ensure_still_wanted(self, session, job: SyncJob) -> None:
+        """Abort if someone else ended the job meanwhile (cancel, consent revocation, deletion)."""
+        await session.refresh(job, ["status", "errors", "voice_profile_id"])
+        if job.status == JobStatus.FAILED.value:
             raise PipelineAbort()
+        voice_pk = self._voices.get(job.id)
+        if voice_pk is not None:
+            voice = await session.get(VoiceProfile, voice_pk, populate_existing=True)
+            if voice is None or not voice.consent:
+                raise PipelineAbort()
+
+    async def _set_status(self, session, job: SyncJob, status: JobStatus) -> None:
+        await self._ensure_still_wanted(session, job)
         job.status = status.value
         await session.commit()
 
@@ -127,7 +147,7 @@ class DubbingPipeline:
         asr_audio = workdir / "speech.mp3"
         if not job.source_audio or not Path(job.source_audio).exists():
             await self._set_status(session, job, JobStatus.PREPROCESSING)
-            await ffmpeg.extract_audio_for_asr(source, asr_audio)
+            await ffmpeg.extract_audio_for_asr(source, asr_audio, settings.MAX_DURATION_MINUTES * 60)
             job.source_audio = str(asr_audio)
             job.duration_seconds = info["duration"]
             await session.commit()
@@ -197,6 +217,7 @@ class DubbingPipeline:
         # 6. Automatic QA -> completed, or human review when something is off
         await self._set_status(session, job, JobStatus.QA_VALIDATION)
         report = await self.qa(segments, Path(job.final_video), info["duration"])
+        await self._ensure_still_wanted(session, job)
         job.qa_report = report
         job.quality_score = report["quality_score"]
         job.status = (JobStatus.COMPLETED if report["overall_pass"] else JobStatus.HITL_REVIEW).value

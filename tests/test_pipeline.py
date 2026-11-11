@@ -139,3 +139,37 @@ async def test_source_must_be_own_upload(session_factory):
     async with session_factory() as s:
         job = await s.get(SyncJob, jid)
     assert job.status == "failed" and "Source upload not found." in job.errors
+
+
+@pytest.mark.asyncio
+async def test_consent_revoked_mid_run_leaves_nothing(session_factory, sample_video):
+    tid, jid, vid = await _setup(session_factory, sample_video)
+
+    class RevokingTTS(FakeTTS):
+        async def synthesize(self, text, voice_id, language, out_path):
+            async with session_factory() as s:  # consent is withdrawn while lines are being voiced
+                v = await s.get(VoiceProfile, vid)
+                if v is not None:
+                    await s.delete(v)
+                    job = await s.get(SyncJob, jid)
+                    job.status = "failed"
+                    job.errors = (job.errors or []) + ["voice consent revoked: dub deleted"]
+                    await s.commit()
+            return await super().synthesize(text, voice_id, language, out_path)
+
+    await DubbingPipeline(session_factory, providers(tts=RevokingTTS())).run_pipeline(jid, vid, tid)
+    async with session_factory() as s:
+        job = await s.get(SyncJob, jid)
+    assert job.status == "failed" and job.final_video is None
+    assert not (storage.tenant_dir(tid) / "jobs" / str(jid)).exists()
+
+
+@pytest.mark.asyncio
+async def test_playlist_container_rejected(tmp_path):
+    from apps.media.ffmpeg import MediaError, media_info
+    target = tmp_path / "secret.txt"
+    target.write_text("top secret")
+    pl = tmp_path / "evil.m3u8"
+    pl.write_text(f"#EXTM3U\n#EXTINF:1,\nfile://{target}\n#EXT-X-ENDLIST\n")
+    with pytest.raises(MediaError):
+        await media_info(pl)

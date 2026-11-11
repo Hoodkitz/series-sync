@@ -37,9 +37,19 @@ async def _run(*args: str, timeout: float = 3600) -> bytes:
     return out
 
 
+# Containers we accept. Playlist/script demuxers (hls, concat, ffconcat, image2 sequences, tty, ...) can make ffmpeg
+# open other local files or network URLs named *inside* an uploaded file, so they are rejected outright.
+SAFE_FORMATS = {"mov", "mp4", "m4a", "3gp", "3g2", "mj2", "matroska", "webm", "avi", "wav", "mp3", "flac", "ogg"}
+
+
+def _inp(path: str | Path) -> list[str]:
+    """Input arguments for a file: local files only, no protocol other than 'file' may ever be opened."""
+    return ["-protocol_whitelist", "file", "-i", str(path)]
+
+
 async def probe(path: str | Path) -> dict:
-    out = await _run(FFPROBE, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", "--", str(path),
-                     timeout=120)
+    out = await _run(FFPROBE, "-v", "error", "-protocol_whitelist", "file", "-print_format", "json", "-show_format",
+                     "-show_streams", "--", str(path), timeout=120)
     try:
         return json.loads(out)
     except json.JSONDecodeError as e:  # pragma: no cover - ffprobe always emits JSON with -print_format json
@@ -49,8 +59,17 @@ async def probe(path: str | Path) -> dict:
 async def media_info(path: str | Path) -> dict:
     """Duration and stream presence of a media file."""
     data = await probe(path)
+    fmt = data.get("format", {})
+    names = set((fmt.get("format_name") or "").split(","))
+    if not names or not names <= SAFE_FORMATS:
+        raise MediaError(f"unsupported container format: {fmt.get('format_name')}")
     streams = data.get("streams", [])
-    duration = float(data.get("format", {}).get("duration") or 0.0)
+    try:
+        duration = float(fmt.get("duration") or 0.0)
+    except ValueError:
+        duration = 0.0
+    if duration <= 0:
+        raise MediaError("media has no measurable duration")
     return {
         "duration": duration,
         "has_video": any(s.get("codec_type") == "video" for s in streams),
@@ -58,22 +77,24 @@ async def media_info(path: str | Path) -> dict:
     }
 
 
-async def extract_audio_for_asr(src: str | Path, dst: str | Path) -> Path:
-    """Mono 16 kHz speech-optimised MP3 (small enough for hosted ASR upload limits)."""
-    await _run(FFMPEG, "-nostdin", "-y", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k",
+async def extract_audio_for_asr(src: str | Path, dst: str | Path, max_seconds: float) -> Path:
+    """Mono 16 kHz speech-optimised MP3 (small enough for hosted ASR upload limits).
+
+    ``-t`` caps the work actually done, independent of the duration the container claims."""
+    await _run(FFMPEG, "-nostdin", "-y", *_inp(src), "-t", f"{max_seconds:.3f}", "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k",
                "-f", "mp3", str(dst))
     return Path(dst)
 
 
 async def cut_audio(src: str | Path, dst: str | Path, start: float, duration: float) -> Path:
-    await _run(FFMPEG, "-nostdin", "-y", "-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(src),
+    await _run(FFMPEG, "-nostdin", "-y", "-ss", f"{start:.3f}", "-t", f"{duration:.3f}", *_inp(src),
                "-ac", "1", "-ar", "16000", "-b:a", "48k", "-f", "mp3", str(dst))
     return Path(dst)
 
 
 async def to_wav(src: str | Path, dst: str | Path) -> Path:
     """Decode anything to mono 16-bit PCM WAV at SAMPLE_RATE."""
-    await _run(FFMPEG, "-nostdin", "-y", "-i", str(src), "-ac", "1", "-ar", str(SAMPLE_RATE), "-sample_fmt", "s16",
+    await _run(FFMPEG, "-nostdin", "-y", *_inp(src), "-ac", "1", "-ar", str(SAMPLE_RATE), "-sample_fmt", "s16",
                "-f", "wav", str(dst))
     return Path(dst)
 
@@ -93,7 +114,7 @@ def _atempo_chain(factor: float) -> str:
 
 async def change_tempo(src: str | Path, dst: str | Path, factor: float) -> Path:
     """Speed speech up (factor > 1) or down without changing pitch."""
-    await _run(FFMPEG, "-nostdin", "-y", "-i", str(src), "-filter:a", _atempo_chain(factor), "-ac", "1",
+    await _run(FFMPEG, "-nostdin", "-y", *_inp(src), "-filter:a", _atempo_chain(factor), "-ac", "1",
                "-ar", str(SAMPLE_RATE), "-sample_fmt", "s16", "-f", "wav", str(dst))
     return Path(dst)
 
@@ -138,7 +159,7 @@ async def mux_dub(video: str | Path, dub_track: str | Path, dst: str | Path, *, 
     effects stay audible. Loudness is normalised to broadcast level (EBU R128, -16 LUFS for streaming).
     """
     info = await media_info(video)
-    args = [FFMPEG, "-nostdin", "-y", "-i", str(video), "-i", str(dub_track)]
+    args = [FFMPEG, "-nostdin", "-y", *_inp(video), *_inp(dub_track)]
     if info["has_audio"] and background_volume > 0:
         fc = (f"[0:a]volume={background_volume:.3f}[bg];"
               f"[1:a][bg]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-16:TP=-1.5:LRA=11[dub]")
@@ -160,7 +181,7 @@ async def mux_dub(video: str | Path, dub_track: str | Path, dst: str | Path, *, 
 
 async def mean_volume_db(path: str | Path) -> float:
     proc = await asyncio.create_subprocess_exec(
-        FFMPEG, "-nostdin", "-i", str(path), "-map", "0:a:0", "-af", "volumedetect", "-f", "null", "-",
+        FFMPEG, "-nostdin", *_inp(path), "-map", "0:a:0", "-af", "volumedetect", "-f", "null", "-",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     _, err = await proc.communicate()
     for line in err.decode(errors="replace").splitlines():
