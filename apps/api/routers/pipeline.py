@@ -61,7 +61,7 @@ async def create_job(req: JobCreate, background_tasks: BackgroundTasks, current_
 
 @router.get("/{job_id}", response_model=JobResponse)
 async def get_job(job_id: str, current_user: User = Depends(check_permission(Permission.READ_JOB)), session: AsyncSession = Depends(get_session)):
-    stmt = select(SyncJobModel).where(SyncJobModel.id == job_id)
+    stmt = select(SyncJobModel).where(SyncJobModel.id == job_id, SyncJobModel.tenant_id == current_user.tenant_id)
     result = await session.execute(stmt)
     job = result.scalars().first()
     if not job:
@@ -82,6 +82,8 @@ async def list_jobs(tenant_id: UUID, current_user: User = Depends(check_permissi
 async def run_qa(job_id: str, current_user: User = Depends(check_permission(Permission.UPDATE_JOB)), session: AsyncSession = Depends(get_session)):
     pipeline = get_pipeline()
     job = await session.get(SyncJobModel, job_id)
+    if job is not None and job.tenant_id != current_user.tenant_id:
+        job = None
     if not job or not job.final_video or not job.translation:
         raise HTTPException(status_code=404, detail="Job not ready for QA")
 
@@ -94,7 +96,7 @@ async def run_qa(job_id: str, current_user: User = Depends(check_permission(Perm
 
 @router.get("/{job_id}/qa-report")
 async def get_qa_report(job_id: str, current_user: User = Depends(check_permission(Permission.READ_JOB)), session: AsyncSession = Depends(get_session)):
-    stmt = select(SyncJobModel).where(SyncJobModel.id == job_id)
+    stmt = select(SyncJobModel).where(SyncJobModel.id == job_id, SyncJobModel.tenant_id == current_user.tenant_id)
     result = await session.execute(stmt)
     job = result.scalars().first()
     if not job:
@@ -106,6 +108,13 @@ async def get_qa_report(job_id: str, current_user: User = Depends(check_permissi
 
 @router.post("/{job_id}/cancel")
 async def cancel_job(job_id: str, current_user: User = Depends(check_permission(Permission.CANCEL_JOB)), session: AsyncSession = Depends(get_session)):
-    """Cancel a running job."""
-    # In production: check Celery task status and revoke
+    """Cancel a running job (tenant-scoped)."""
+    job = (await session.execute(select(SyncJobModel).where(
+        SyncJobModel.id == job_id, SyncJobModel.tenant_id == current_user.tenant_id))).scalars().first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status not in ("completed", "failed"):
+        job.status = "failed"
+        job.errors = (job.errors or []) + ["cancelled by user"]
+        await session.commit()
     return {"status": "cancelled", "job_id": job_id}
