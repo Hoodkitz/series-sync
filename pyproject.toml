@@ -17,16 +17,15 @@ dependencies = [
     "python-dotenv",
     "alembic",
     "celery",
-    "FFmpeg",
-    "whisper",
-    "torch",
-    "torchaudio",
     "numpy",
-    "opencv-python",
     "deep-translator",
     "elevenlabs",
     "openai",
     "pydub",
+    "pydantic-settings",
+    "aiofiles",
+    "aiohttp",
+    "argon2-cffi",
 ]
 
 [build-system]
