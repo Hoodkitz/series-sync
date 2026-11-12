@@ -221,3 +221,24 @@ def test_retry_delay_honours_provider_hint():
     assert _retry_delay(r, 0) == 12.5
     r = httpx.Response(503, headers={"retry-after": "300"}, request=httpx.Request("POST", "https://x"))
     assert _retry_delay(r, 0) == 65.0
+
+
+@pytest.mark.asyncio
+async def test_dub_track_is_full_length_and_original_voice_is_muted(session_factory, sample_video):
+    tid, jid, vid = await _setup(session_factory, sample_video)
+    await DubbingPipeline(session_factory, providers()).run_pipeline(jid, vid, tid)
+    async with session_factory() as s:
+        job = await s.get(SyncJob, jid)
+    probe = await ffmpeg.probe(job.final_video)
+    audio = [st for st in probe["streams"] if st["codec_type"] == "audio"]
+    assert float(audio[0]["duration"]) > 7.5  # was cut ~3 s early by -shortest + loudnorm latency
+    # background under a spoken line is silent: ducking envelope check on the helper
+    import numpy as np, wave
+    from pathlib import Path
+    src = Path(job.final_video).with_name("bgtest.wav")
+    await ffmpeg.to_wav(sample_video, src)
+    out = ffmpeg.duck_background(src, src.with_name("bgtest_d.wav"), [(2.0, 4.0)], 0.2)
+    data = ffmpeg.read_wav(out).astype(np.int32)
+    sr = ffmpeg.SAMPLE_RATE
+    assert np.abs(data[int(2.5 * sr):int(3.5 * sr)]).max() == 0
+    assert np.abs(data[int(5.5 * sr):int(6.5 * sr)]).max() > 0

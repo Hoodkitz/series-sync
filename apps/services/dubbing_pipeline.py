@@ -168,6 +168,11 @@ class DubbingPipeline:
             if lang is None:
                 job.source_language = tr.language
             segments = [dict(s) for s in tr.segments]
+            if job.voice_profile_id is None and hasattr(self.p.tts, "auto_voices"):
+                # no voice chosen: give every detected speaker an own voice of matching gender
+                voices = self.p.tts.auto_voices(segments)
+                for seg in segments:
+                    seg["voice"] = voices.get(seg.get("speaker", "S1"))
             job.transcription = "\n".join(s["text"] for s in segments)
             await self._save_segments(session, job, segments)
 
@@ -213,7 +218,8 @@ class DubbingPipeline:
             out = workdir / "output.mp4"
             bg = job.background_volume if job.background_volume is not None else settings.BACKGROUND_VOLUME
             await ffmpeg.mux_dub(video, dub, out, background_volume=bg,
-                                 target_language=job.target_language, source_language=job.source_language)
+                                 target_language=job.target_language, source_language=job.source_language,
+                                 speech=[(s["start"], s["end"]) for s in segments])
             job.final_video = str(out)
             job.output_video_url = f"/jobs/{job.id}/output"
             job.qa_report = None
@@ -241,7 +247,7 @@ class DubbingPipeline:
             await ffmpeg.synth_tone(fitted, 0.05, freq=1)  # an empty line stays (practically) silent
             seg.update(fitted=str(fitted), tempo=1.0, dub_seconds=0.0, slot=0.0, overrun=0.0)
             return
-        await self.p.tts.synthesize(text, voice_id, lang, raw)
+        await self.p.tts.synthesize(text, seg.get("voice") or voice_id, lang, raw)
         raw_dur = ffmpeg.wav_duration(raw)
         next_start = segments[i + 1]["start"] if i + 1 < len(segments) else total
         slot = max(0.2, next_start - seg["start"] - GAP)

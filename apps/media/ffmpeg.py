@@ -151,21 +151,59 @@ def assemble_track(placements: list[tuple[str | Path, float]], total_seconds: fl
     return Path(dst)
 
 
+def duck_background(src_wav: str | Path, dst: str | Path, speech: list[tuple[float, float]], level: float,
+                    under_speech: float = 0.0, ramp: float = 0.12) -> Path:
+    """Original soundtrack as dub background: ``level`` between lines, ``under_speech`` while a line is spoken.
+
+    Without stem separation the original voices sit in the same track as music and effects, so they must be
+    pulled out wherever the dub speaks; short ramps avoid clicks.
+    """
+    data = read_wav(src_wav).astype(np.float32)
+    env = np.full(len(data), level, dtype=np.float32)
+    r = max(1, int(ramp * SAMPLE_RATE))
+    for start, end in speech:
+        a, b = max(0, int((start - ramp) * SAMPLE_RATE)), min(len(data), int((end + ramp) * SAMPLE_RATE))
+        if b <= a:
+            continue
+        env[a:b] = np.minimum(env[a:b], under_speech)
+        fade_in = np.linspace(level, under_speech, r, dtype=np.float32)
+        lo = max(0, a - r)
+        env[lo:a] = np.minimum(env[lo:a], fade_in[-(a - lo):] if a > lo else fade_in[:0])
+        fade_out = np.linspace(under_speech, level, r, dtype=np.float32)
+        hi = min(len(data), b + r)
+        env[b:hi] = np.minimum(env[b:hi], fade_out[: hi - b])
+    out = np.clip(data * env, -32768, 32767).astype(np.int16)
+    with wave.open(str(dst), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SAMPLE_RATE)
+        w.writeframes(out.tobytes())
+    return Path(dst)
+
+
 async def mux_dub(video: str | Path, dub_track: str | Path, dst: str | Path, *, background_volume: float,
-                  target_language: str, source_language: str, keep_original_track: bool = True) -> Path:
+                  target_language: str, source_language: str, keep_original_track: bool = True,
+                  speech: list[tuple[float, float]] | None = None) -> Path:
     """Write the final MP4: video copied, dubbed mix as default audio, original audio as optional 2nd track.
 
-    The dub mix is the synthesised speech plus the original soundtrack at ``background_volume`` so music and
-    effects stay audible. Loudness is normalised to broadcast level (EBU R128, -16 LUFS for streaming).
+    The dub mix is the synthesised speech plus the original soundtrack at ``background_volume`` (muted while the
+    original speaks, see ``duck_background``) so music and effects stay audible between lines. Loudness is
+    normalised to -16 LUFS. No ``-shortest``: loudnorm buffers ~3 s, which -shortest would cut off.
     """
     info = await media_info(video)
-    args = [FFMPEG, "-nostdin", "-y", *_inp(video), *_inp(dub_track)]
+    duration = info["duration"]
+    inputs = [*_inp(video), *_inp(dub_track)]
     if info["has_audio"] and background_volume > 0:
-        fc = (f"[0:a]volume={background_volume:.3f}[bg];"
-              f"[1:a][bg]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-16:TP=-1.5:LRA=11[dub]")
+        bg_raw = Path(dst).with_name("bg_original.wav")
+        await to_wav(video, bg_raw)
+        bg = duck_background(bg_raw, Path(dst).with_name("bg_ducked.wav"), speech or [], background_volume)
+        bg_raw.unlink(missing_ok=True)
+        inputs += _inp(bg)
+        fc = ("[1:a][2:a]amix=inputs=2:duration=first:normalize=0,"
+              "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000,aformat=channel_layouts=stereo[dub]")
     else:
-        fc = "[1:a]loudnorm=I=-16:TP=-1.5:LRA=11[dub]"
-    args += ["-filter_complex", fc, "-map", "0:v:0", "-map", "[dub]"]
+        fc = "[1:a]loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000,aformat=channel_layouts=stereo[dub]"
+    args = [FFMPEG, "-nostdin", "-y", *inputs, "-filter_complex", fc, "-map", "0:v:0", "-map", "[dub]"]
     if info["has_audio"] and keep_original_track:
         args += ["-map", "0:a:0"]
     args += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
@@ -174,7 +212,7 @@ async def mux_dub(video: str | Path, dub_track: str | Path, dst: str | Path, *, 
         args += ["-metadata:s:a:1", f"language={_iso639_2(source_language)}", "-disposition:a:1", "0"]
     # EU AI Act Art. 50: synthetic audio must be machine-readably marked as AI-generated.
     args += ["-metadata", "comment=AI-generated dubbing (Series Sync)", "-metadata:s:a:0",
-             "handler_name=AI-generated dub", "-shortest", "-movflags", "+faststart", str(dst)]
+             "handler_name=AI-generated dub", "-t", f"{duration:.3f}", "-movflags", "+faststart", str(dst)]
     await _run(*args)
     return Path(dst)
 

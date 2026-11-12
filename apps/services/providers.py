@@ -293,7 +293,9 @@ class GeminiASR:
               "(about 1.5 to 8 seconds; keep short interjections like 'Dude,' together with the following words of "
               "the same speaker). Return JSON only: {\"language\": \"<ISO 639-1 code>\", "
               "\"segments\": [{\"start\": <seconds float>, \"end\": <seconds float>, \"text\": \"...\"}]}. "
-              "Times are relative to the start of this audio. Leave out music, noise and silence.")
+              "Times are relative to the start of this audio. Leave out music, noise and silence. "
+              "Also give each line \"speaker\" (a stable label like \"S1\", \"S2\" for the same voice throughout) and "
+              "\"gender\" of that voice (\"male\", \"female\" or \"unknown\").")
 
     async def transcribe(self, audio_path: Path, language: str | None) -> Transcript:
         import base64
@@ -325,7 +327,10 @@ class GeminiASR:
                     continue
                 a, b = max(0.0, min(a, chunk_len)), max(0.0, min(b, chunk_len))
                 if text and b > a:
-                    segments.append({"start": round(start + a, 3), "end": round(start + b, 3), "text": text})
+                    gender = str(seg.get("gender") or "unknown").lower()
+                    segments.append({"start": round(start + a, 3), "end": round(start + b, 3), "text": text,
+                                     "speaker": str(seg.get("speaker") or "S1")[:20],
+                                     "gender": gender if gender in ("male", "female") else "unknown"})
             start += self.CHUNK_SECONDS
             idx += 1
         segments.sort(key=lambda s: s["start"])
@@ -337,6 +342,21 @@ class GeminiASR:
 
 class GeminiTTS:
     """Gemini speech synthesis (prebuilt voices, multilingual; returns 24 kHz PCM)."""
+    MALE = ["Charon", "Puck", "Fenrir", "Orus", "Iapetus", "Algenib", "Umbriel", "Enceladus"]
+    FEMALE = ["Kore", "Aoede", "Leda", "Zephyr", "Callirrhoe", "Despina", "Erinome", "Laomedeia"]
+
+    def auto_voices(self, segments: list[dict]) -> dict[str, str]:
+        """One distinct voice per detected speaker, matching the speaker's gender."""
+        used: dict[str, str] = {}
+        pools = {"male": list(self.MALE), "female": list(self.FEMALE), "unknown": list(self.MALE + self.FEMALE)}
+        for seg in segments:
+            spk = seg.get("speaker", "S1")
+            if spk in used:
+                continue
+            pool = pools.get(seg.get("gender", "unknown"), pools["unknown"])
+            voice = next((v for v in pool if v not in used.values()), pool[len(used) % len(pool)])
+            used[spk] = voice
+        return used
 
     async def _request(self, text: str, voice: str) -> tuple[dict | None, str]:
         r = await _post(f"{GEMINI}/models/{settings.GEMINI_TTS_MODEL}:generateContent", retries=6,
