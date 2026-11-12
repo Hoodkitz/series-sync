@@ -212,7 +212,7 @@ const renderVoices = () => `
                 <form onsubmit="window.app.createStockVoice(event)">
                     <label>Stimmen-Name</label>
                     <input type="text" id="stockVoiceName" required>
-                    <label>Provider ID (z.B. pNInz6obpgDQGcFmaJcg)</label>
+                    <label>Stimme (Gemini: z. B. Kore, Puck, Charon, Aoede – ElevenLabs: Voice-ID)</label>
                     <input type="text" id="stockVoiceId" required>
                     <button type="submit">Standardstimme speichern</button>
                 </form>
