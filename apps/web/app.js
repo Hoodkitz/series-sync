@@ -474,6 +474,8 @@ window.app = {
                        · ${escapeHTML(job.source_language)} → ${escapeHTML(job.target_language)}</p>
                     ${job.errors && job.errors.length ? `<p class="error-message">${job.errors.map(escapeHTML).join('<br>')}</p>` : ''}
                     ${job.status === 'failed' ? `<button onclick="window.app.renderJob('${job.id}')">Erneut versuchen</button>` : ''}
+                    ${ACTIVE.includes(job.status) ? `<button class="secondary" onclick="window.app.cancelJob('${job.id}')">Abbrechen</button>
+                        <button class="secondary" onclick="window.app.renderJob('${job.id}')" title="Falls die Verarbeitung hängt (z. B. nach einem Neustart)">Fortsetzen</button>` : ''}
                 </div>
             `;
             if (ACTIVE.includes(job.status)) {
@@ -585,6 +587,12 @@ window.app = {
         } catch (e) { alert(e.message); }
     },
     
+    cancelJob: async (jobId) => {
+        if (!confirm("Verarbeitung abbrechen? Bereits erzeugte Zwischenergebnisse bleiben erhalten.")) return;
+        try { await apiCall(`/jobs/${jobId}/cancel`, { method: "POST" }); window.app.loadJobDetail(); }
+        catch (e) { alert(e.message); }
+    },
+
     approveJob: async (jobId) => {
         try {
             await apiCall(`/jobs/${jobId}/approve`, { method: "POST" });

@@ -101,6 +101,11 @@ class DubbingPipeline:
                 job = await session.get(SyncJob, job_id, populate_existing=True)
                 if job is None or any("consent revoked" in e for e in (job.errors or [])):
                     storage.delete_job_files(job_tenant, job_id)
+                elif job.status not in (JobStatus.FAILED.value, JobStatus.EDITED.value):
+                    # aborted for another reason (e.g. the voice was deleted): never leave it "processing"
+                    job.status = JobStatus.FAILED.value
+                    job.errors = (job.errors or []) + ["Voice profile no longer available – choose a voice and retry."]
+                    await session.commit()
                 return
             except Exception as e:  # checkpointed: a retry resumes at the failed stage
                 log.exception("job %s failed", job_id)
@@ -117,8 +122,8 @@ class DubbingPipeline:
     async def _ensure_still_wanted(self, session, job: SyncJob) -> None:
         """Abort if someone else ended the job meanwhile (cancel, consent revocation, deletion)."""
         await session.refresh(job, ["status", "errors", "voice_profile_id"])
-        if job.status == JobStatus.FAILED.value:
-            raise PipelineAbort()
+        if job.status in (JobStatus.FAILED.value, JobStatus.EDITED.value):
+            raise PipelineAbort()  # cancelled, or a human edited lines meanwhile: this run's data is stale
         voice_pk = self._voices.get(job.id)
         if voice_pk is not None:
             voice = await session.get(VoiceProfile, voice_pk, populate_existing=True)
@@ -257,9 +262,16 @@ class DubbingPipeline:
         issues: list[str] = []
         overruns = [i for i, s in enumerate(segments) if s.get("overrun", 0) > OVERRUN_TOLERANCE]
         rushed = [i for i, s in enumerate(segments) if s.get("tempo", 1.0) >= MAX_TEMPO - 1e-6]
-        untranslated = [i for i, s in enumerate(segments)
-                        if not (s.get("translation") or "").strip()
-                        or s["translation"].strip().lower() == s["text"].strip().lower()]
+        def _untranslated(s: dict) -> bool:
+            if s.get("edited"):
+                return False  # a human decided (an empty line is an intentional silence)
+            t = (s.get("translation") or "").strip()
+            if not t:
+                return True
+            # identical text is fine for short lines / names ("Okay.", "Max!"), suspicious for real sentences
+            return t.lower() == s["text"].strip().lower() and len(t.split()) > 2
+
+        untranslated = [i for i, s in enumerate(segments) if _untranslated(s)]
         for i in overruns:
             issues.append(f"line {i + 1}: dub runs {segments[i]['overrun']:.2f}s into the next line")
         for i in untranslated:
@@ -302,3 +314,8 @@ def _public_error(e: Exception) -> str:
     if isinstance(e, (ProviderError, ffmpeg.MediaError)):
         return str(e)[:500]
     return f"Internal processing error ({e.__class__.__name__}). Please retry."
+
+
+
+def is_running(job_id) -> bool:
+    return UUID(str(job_id)) in _running

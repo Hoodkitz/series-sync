@@ -20,7 +20,7 @@ from apps.core.permissions import Permission
 from apps.db.models import SyncJob, User, VoiceProfile
 from apps.db.session import AsyncSessionLocal, get_session, set_tenant_context
 from apps.media import ffmpeg, storage
-from apps.services.dubbing_pipeline import DubbingPipeline
+from apps.services.dubbing_pipeline import DubbingPipeline, is_running
 
 uploads = APIRouter(prefix="/uploads", tags=["uploads"])
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -28,6 +28,13 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 ACTIVE = {JobStatus.UPLOADED.value, JobStatus.PREPROCESSING.value, JobStatus.TRANSCRIPTION.value,
           JobStatus.TRANSLATION.value, JobStatus.TTS_GENERATION.value, JobStatus.LIP_SYNC.value,
           JobStatus.RENDERING.value, JobStatus.QA_VALIDATION.value}
+
+
+def _recent(job) -> bool:
+    """An 'active' job that is not running in this process was interrupted (restart/deploy). It may be resumed
+    once it has been quiet for a while (single-process deployment; a multi-worker setup needs a shared lock)."""
+    from datetime import datetime, timedelta
+    return (datetime.utcnow() - (job.created_at or datetime.utcnow())) < timedelta(minutes=2)
 
 
 def get_pipeline() -> DubbingPipeline:
@@ -147,7 +154,7 @@ async def edit_segment(job_id: UUID, index: int, req: SegmentEdit,
                        session: AsyncSession = Depends(get_session)):
     """Human correction of one line. The line is re-voiced and the video re-rendered on the next /render."""
     job = await _job(session, job_id, user)
-    if job.status in ACTIVE:
+    if job.status in ACTIVE or is_running(job.id):
         raise HTTPException(409, "Job is still processing")
     segments = [dict(s) for s in (job.segments or [])]
     if not 0 <= index < len(segments):
@@ -173,7 +180,7 @@ async def render(job_id: UUID, background: BackgroundTasks,
                  session: AsyncSession = Depends(get_session), pipeline: DubbingPipeline = Depends(get_pipeline)):
     """Resume a failed job or re-render after edits; finished stages are reused, nothing is paid twice."""
     job = await _job(session, job_id, user)
-    if job.status in ACTIVE:
+    if is_running(job.id) or (job.status in ACTIVE and job.status != JobStatus.UPLOADED.value and _recent(job)):
         raise HTTPException(409, "Job is still processing")
     if job.status in (JobStatus.COMPLETED.value, JobStatus.HITL_REVIEW.value) and job.final_video:
         raise HTTPException(409, "Nothing changed since the last render")

@@ -173,3 +173,42 @@ async def test_playlist_container_rejected(tmp_path):
     pl.write_text(f"#EXTM3U\n#EXTINF:1,\nfile://{target}\n#EXT-X-ENDLIST\n")
     with pytest.raises(MediaError):
         await media_info(pl)
+
+
+@pytest.mark.asyncio
+async def test_identical_short_lines_and_edits_do_not_force_review(session_factory, sample_video):
+    tid, jid, vid = await _setup(session_factory, sample_video)
+
+    class Names(FakeTranslator):
+        async def translate(self, segments, source, target):
+            return ["Okay." if i == 0 else f"Zeile {i + 1}, weißt du?" for i, _ in enumerate(segments)]
+
+    class OkayASR(FakeASR):
+        async def transcribe(self, *a, **k):
+            tr = await super().transcribe(*a, **k)
+            tr.segments[0]["text"] = "Okay."
+            return tr
+
+    await DubbingPipeline(session_factory, providers(asr=OkayASR(), translator=Names())).run_pipeline(jid, vid, tid)
+    async with session_factory() as s:
+        job = await s.get(SyncJob, jid)
+    assert job.qa_report["translation_accuracy_score"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_deleted_voice_mid_run_fails_instead_of_hanging(session_factory, sample_video):
+    tid, jid, vid = await _setup(session_factory, sample_video)
+
+    class DeletingTTS(FakeTTS):
+        async def synthesize(self, text, voice_id, language, out_path):
+            async with session_factory() as s:
+                v = await s.get(VoiceProfile, vid)
+                if v is not None:
+                    await s.delete(v)
+                    await s.commit()
+            return await super().synthesize(text, voice_id, language, out_path)
+
+    await DubbingPipeline(session_factory, providers(tts=DeletingTTS())).run_pipeline(jid, vid, tid)
+    async with session_factory() as s:
+        job = await s.get(SyncJob, jid)
+    assert job.status == "failed"
