@@ -61,7 +61,8 @@ class JobListResponse(BaseModel):
 class VoiceCreate(BaseModel):
     """Register a stock/provider voice by id (no voice cloning)."""
     speaker_name: str = Field(min_length=1, max_length=255)
-    voice_preset: str = Field(pattern=r"^[A-Za-z0-9]{8,64}$", description="Provider voice id")
+    voice_preset: str = Field(pattern=r"^[A-Za-z0-9]{3,64}$",
+                              description="Provider voice id (ElevenLabs id, or a Gemini voice name such as 'Kore')")
     language: str = Field("de", pattern=r"^[a-z]{2}$")
     consent: bool = Field(description="Licence/consent for this voice is documented")
     is_default: bool = False

@@ -21,7 +21,13 @@ class Settings(BaseSettings):
     ELEVENLABS_MODEL: str = os.getenv("ELEVENLABS_MODEL", "eleven_multilingual_v2")
     TTS_DEFAULT_VOICE: str = os.getenv("TTS_DEFAULT_VOICE", "pNInz6obpgDQGcFmaJgB")  # ElevenLabs stock voice
     TTS_CONCURRENCY: int = int(os.getenv("TTS_CONCURRENCY", "4"))
-    # fake = deterministic local providers (dev/tests); real = OpenAI-compatible ASR/LLM + ElevenLabs
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    GEMINI_API_KEY_FILE: str = os.getenv("GEMINI_API_KEY_FILE", "~/.secrets/gemini_api_key")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    GEMINI_TTS_MODEL: str = os.getenv("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
+    GEMINI_TTS_VOICE: str = os.getenv("GEMINI_TTS_VOICE", "Kore")
+    # fake = deterministic local providers (dev/tests); real = OpenAI-compatible ASR/LLM + ElevenLabs;
+    # gemini = one Google key for transcription, translation and speech (no voice cloning)
     PROVIDER_MODE: str = os.getenv("PROVIDER_MODE", "real")
     STORAGE_DIR: str = os.getenv("STORAGE_DIR", "./var/storage")
     MAX_UPLOAD_MB: int = int(os.getenv("MAX_UPLOAD_MB", "4096"))
@@ -37,6 +43,8 @@ if settings.ENV != "development" and (settings.JWT_SECRET == "dev-secret-change-
     raise RuntimeError("JWT_SECRET must be set (>= 32 chars) outside development")
 if settings.ENV != "development" and settings.PROVIDER_MODE == "fake":
     raise RuntimeError("PROVIDER_MODE=fake is only allowed with ENV=development")
+if settings.PROVIDER_MODE not in ("fake", "real", "gemini"):
+    raise RuntimeError("PROVIDER_MODE must be fake, real or gemini")
 if settings.PROVIDER_MODE == "real" and settings.ENV != "development" and not (
         settings.OPENAI_API_KEY and settings.ELEVENLABS_API_KEY):
     raise RuntimeError("OPENAI_API_KEY and ELEVENLABS_API_KEY are required for PROVIDER_MODE=real")

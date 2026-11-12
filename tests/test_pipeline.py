@@ -212,3 +212,12 @@ async def test_deleted_voice_mid_run_fails_instead_of_hanging(session_factory, s
     async with session_factory() as s:
         job = await s.get(SyncJob, jid)
     assert job.status == "failed"
+
+
+def test_retry_delay_honours_provider_hint():
+    import httpx
+    from apps.services.providers import _retry_delay
+    r = httpx.Response(429, text="Please retry in 12.5s.", request=httpx.Request("POST", "https://x"))
+    assert _retry_delay(r, 0) == 12.5
+    r = httpx.Response(503, headers={"retry-after": "300"}, request=httpx.Request("POST", "https://x"))
+    assert _retry_delay(r, 0) == 65.0

@@ -62,6 +62,13 @@ Weitere Endpunkte: `GET /jobs`, `GET /jobs/{id}/output` (Download), `POST /jobs/
 - **Hintergrund** wird leiser gemischt statt per Stem-Separation (Demucs) sauber getrennt.
 - Verarbeitung läuft im API-Prozess (BackgroundTasks); für viele parallele Kunden einen Worker (z.B. arq/Celery) ergänzen.
 
+### Anbieter
+- `PROVIDER_MODE=gemini`: **ein Google-Gemini-Key** für Transkription, Übersetzung und Sprachausgabe (30 Stimmen, z. B. `Kore`, `Puck`).
+  Real getestet: englischer Clip → deutsche Synchronfassung, QA 100 %. Free-Tier: nur 3 Sprachausgaben/Minute –
+  für echte Folgen Billing aktivieren. Kein Stimmklon.
+- `PROVIDER_MODE=real`: OpenAI (Whisper + LLM) + ElevenLabs (inkl. Stimmklon).
+- `PROVIDER_MODE=fake`: lokale Demo/Tests ohne Kosten.
+
 ## Setup
 
 ```bash

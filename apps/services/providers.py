@@ -53,6 +53,16 @@ class LipSync(Protocol):
 
 
 # ---------------------------------------------------------------- shared HTTP helper
+def _retry_delay(r: httpx.Response, attempt: int) -> float:
+    """Honour the provider's back-off hint (Retry-After header or 'retry in Ns' in the body), capped at 65 s."""
+    hint = r.headers.get("retry-after")
+    if hint is None:
+        m = re.search(r"retry in ([0-9.]+)s", r.text or "")
+        hint = m.group(1) if m else None
+    try:
+        return min(65.0, max(1.0, float(hint))) if hint else float(2 ** attempt)
+    except ValueError:
+        return float(2 ** attempt)
 async def _post(url: str, *, headers: dict, retries: int = 3, timeout: float = 300, **kw) -> httpx.Response:
     last: Exception | None = None
     for attempt in range(retries):
@@ -60,8 +70,8 @@ async def _post(url: str, *, headers: dict, retries: int = 3, timeout: float = 3
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as c:
                 r = await c.post(url, headers=headers, **kw)
             if r.status_code in (429, 500, 502, 503, 504):
-                last = ProviderError(f"{url} -> HTTP {r.status_code}")
-                await asyncio.sleep(2 ** attempt)
+                last = ProviderError(f"{url.split('?')[0]} -> HTTP {r.status_code} (rate limit or provider busy)")
+                await asyncio.sleep(_retry_delay(r, attempt))
                 continue
             if r.status_code >= 400:
                 raise ProviderError(f"{url.split('?')[0]} -> HTTP {r.status_code}: {r.text[:200]}")
@@ -135,6 +145,11 @@ dubbing of a TV series. Rules:
 class LLMTranslator:
     BATCH = 30
 
+    def __init__(self, base_url: str | None = None, api_key: str | None = None, model: str | None = None):
+        self.base_url = base_url or settings.OPENAI_BASE_URL
+        self.api_key = api_key or settings.OPENAI_API_KEY
+        self.model = model or settings.LLM_MODEL
+
     async def translate(self, segments: list[dict], source: str, target: str) -> list[str]:
         out: list[str] = []
         for i in range(0, len(segments), self.BATCH):
@@ -146,9 +161,9 @@ class LLMTranslator:
         lines = [{"i": n, "seconds": round(s["end"] - s["start"], 2), "text": s["text"]} for n, s in enumerate(batch)]
         user = json.dumps({"previous_translated_lines": context, "lines": lines}, ensure_ascii=False)
         for attempt in range(2):
-            r = await _post(f"{settings.OPENAI_BASE_URL}/chat/completions",
-                            headers={"Authorization": f"Bearer {settings.OPENAI_API_KEY}"},
-                            json={"model": settings.LLM_MODEL, "temperature": 0.3,
+            r = await _post(f"{self.base_url}/chat/completions",
+                            headers={"Authorization": f"Bearer {self.api_key}"},
+                            json={"model": self.model, "temperature": 0.3,
                                   "response_format": {"type": "json_object"},
                                   "messages": [{"role": "system",
                                                 "content": DUB_PROMPT.format(src=source, tgt=target, cps=15)},
@@ -254,7 +269,130 @@ class Providers:
     cloner: VoiceCloner
 
 
+# ---------------------------------------------------------------- Google Gemini (one key for ASR, translation, TTS)
+GEMINI = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_VOICES = {"Kore", "Puck", "Charon", "Fenrir", "Aoede", "Leda", "Orus", "Zephyr", "Callirrhoe", "Autonoe",
+                 "Enceladus", "Iapetus", "Umbriel", "Algieba", "Despina", "Erinome", "Algenib", "Rasalgethi",
+                 "Laomedeia", "Achernar", "Alnilam", "Schedar", "Gacrux", "Pulcherrima", "Achird", "Zubenelgenubi",
+                 "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat"}
+
+
+def _gemini_key() -> str:
+    if settings.GEMINI_API_KEY:
+        return settings.GEMINI_API_KEY
+    try:
+        return Path(settings.GEMINI_API_KEY_FILE).expanduser().read_text().strip()
+    except OSError:
+        raise ProviderError("Gemini API key missing")
+
+
+class GeminiASR:
+    """Transcription with per-line timestamps via Gemini audio understanding (chunks of 10 minutes)."""
+    CHUNK_SECONDS = 10 * 60
+    PROMPT = ("Transcribe this audio for dubbing. Split it into natural spoken lines: one full sentence each "
+              "(about 1.5 to 8 seconds; keep short interjections like 'Dude,' together with the following words of "
+              "the same speaker). Return JSON only: {\"language\": \"<ISO 639-1 code>\", "
+              "\"segments\": [{\"start\": <seconds float>, \"end\": <seconds float>, \"text\": \"...\"}]}. "
+              "Times are relative to the start of this audio. Leave out music, noise and silence.")
+
+    async def transcribe(self, audio_path: Path, language: str | None) -> Transcript:
+        import base64
+        info = await ffmpeg.media_info(audio_path)
+        total, start, detected, segments, idx = info["duration"], 0.0, language or "", [], 0
+        while start < total:
+            chunk = audio_path
+            if total > self.CHUNK_SECONDS:
+                chunk = audio_path.with_name(f"asr_chunk_{idx}.mp3")
+                await ffmpeg.cut_audio(audio_path, chunk, start, self.CHUNK_SECONDS)
+            prompt = self.PROMPT + (f" The spoken language is '{language}'." if language else "")
+            r = await _post(f"{GEMINI}/models/{settings.GEMINI_MODEL}:generateContent",
+                            headers={"x-goog-api-key": _gemini_key()},
+                            json={"contents": [{"parts": [
+                                {"inline_data": {"mime_type": "audio/mpeg",
+                                                 "data": base64.b64encode(chunk.read_bytes()).decode()}},
+                                {"text": prompt}]}],
+                                  "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}})
+            try:
+                body = json.loads(r.json()["candidates"][0]["content"]["parts"][0]["text"])
+            except (KeyError, IndexError, ValueError, TypeError):
+                raise ProviderError("transcription returned no usable result")
+            detected = detected or _lang_code(str(body.get("language", "")))
+            chunk_len = min(self.CHUNK_SECONDS, total - start)
+            for seg in body.get("segments", []):
+                try:
+                    a, b, text = float(seg["start"]), float(seg["end"]), str(seg["text"]).strip()
+                except (KeyError, ValueError, TypeError):
+                    continue
+                a, b = max(0.0, min(a, chunk_len)), max(0.0, min(b, chunk_len))
+                if text and b > a:
+                    segments.append({"start": round(start + a, 3), "end": round(start + b, 3), "text": text})
+            start += self.CHUNK_SECONDS
+            idx += 1
+        segments.sort(key=lambda s: s["start"])
+        for prev, cur in zip(segments, segments[1:]):  # model timestamps may overlap slightly
+            if cur["start"] < prev["end"]:
+                prev["end"] = max(prev["start"] + 0.2, cur["start"])
+        return Transcript(language=detected or "en", segments=segments)
+
+
+class GeminiTTS:
+    """Gemini speech synthesis (prebuilt voices, multilingual; returns 24 kHz PCM)."""
+
+    async def _request(self, text: str, voice: str) -> tuple[dict | None, str]:
+        r = await _post(f"{GEMINI}/models/{settings.GEMINI_TTS_MODEL}:generateContent", retries=6,
+                        headers={"x-goog-api-key": _gemini_key()},
+                        json={"contents": [{"parts": [{"text": text}]}],
+                              "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {
+                                  "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}}})
+        cand = (r.json().get("candidates") or [{}])[0] or {}
+        try:
+            return cand["content"]["parts"][0]["inlineData"], ""
+        except (KeyError, IndexError, TypeError):
+            return None, cand.get("finishReason", "unknown")
+
+    async def synthesize(self, text: str, voice_id: str, language: str, out_path: Path) -> Path:
+        import base64
+        voice = voice_id if voice_id in GEMINI_VOICES else settings.GEMINI_TTS_VOICE
+        part, reason = await self._request(text, voice)
+        if part is None:  # very short lines ("Egal.") are sometimes refused; a style hint makes them speakable
+            part, reason = await self._request(f"Say naturally, in a casual tone: {text}", voice)
+        if part is None:
+            raise ProviderError(f"speech synthesis returned no audio (finish reason: {reason})")
+        try:
+            pcm = base64.b64decode(part["data"])
+        except (KeyError, ValueError, TypeError):
+            raise ProviderError("speech synthesis returned no audio")
+        rate = 24000
+        mime = part.get("mimeType", "")
+        if "rate=" in mime:
+            try:
+                rate = int(mime.split("rate=")[1].split(";")[0])
+            except ValueError:
+                pass
+        raw = out_path.with_suffix(".pcm.wav")
+        import wave
+        with wave.open(str(raw), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(pcm)
+        await ffmpeg.to_wav(raw, out_path)
+        raw.unlink(missing_ok=True)
+        return out_path
+
+
+class NoCloner:
+    async def clone(self, name: str, sample: Path) -> str:
+        raise ProviderError("Voice cloning needs the ElevenLabs provider (PROVIDER_MODE=real)")
+
+    async def delete(self, voice_id: str) -> None:
+        return None
+
+
 def default_providers() -> Providers:
     if settings.PROVIDER_MODE == "fake":
         return Providers(FakeASR(), FakeTranslator(), FakeTTS(), NoLipSync(), FakeCloner())
+    if settings.PROVIDER_MODE == "gemini":
+        return Providers(GeminiASR(), LLMTranslator(f"{GEMINI}/openai", _gemini_key(), settings.GEMINI_MODEL),
+                         GeminiTTS(), NoLipSync(), NoCloner())
     return Providers(OpenAIWhisperASR(), LLMTranslator(), ElevenLabsTTS(), NoLipSync(), ElevenLabsCloner())
