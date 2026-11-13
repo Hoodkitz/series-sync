@@ -22,6 +22,10 @@ class ProviderError(RuntimeError):
     """A provider call failed in a way that retrying the job later may fix."""
 
 
+class QuotaExceeded(ProviderError):
+    """Provider quota or mock quota exceeded: temporary, retry later."""
+
+
 @dataclass
 class Transcript:
     language: str
@@ -260,6 +264,35 @@ class FakeCloner:
         self.deleted = getattr(self, "deleted", []) + [voice_id]
 
 
+class MockGeminiTTS:
+    """Mock Gemini speech synthesis (prebuilt voices, multilingual; returns 24 kHz PCM).
+    Raises ProviderError after a configurable number of calls to simulate API quota limits."""
+    MALE = ["Charon", "Puck", "Fenrir", "Orus", "Iapetus", "Algenib", "Umbriel", "Enceladus"]
+    FEMALE = ["Kore", "Aoede", "Leda", "Zephyr", "Callirrhoe", "Despina", "Erinome", "Laomedeia"]
+    _call_count: int = 0
+
+    def auto_voices(self, segments: list[dict]) -> dict[str, str]:
+        used: dict[str, str] = {}
+        pools = {"male": list(self.MALE), "female": list(self.FEMALE), "unknown": list(self.MALE + self.FEMALE)}
+        for seg in segments:
+            spk = seg.get("speaker", "S1")
+            if spk in used:
+                continue
+            pool = pools.get(seg.get("gender", "unknown"), pools["unknown"])
+            voice = next((v for v in pool if v not in used.values()), pool[len(used) % len(pool)])
+            used[spk] = voice
+        return used
+
+    async def synthesize(self, text: str, voice_id: str, language: str, out_path: Path) -> Path:
+        if settings.GEMINI_MOCK_TTS_LIMIT > 0:
+            MockGeminiTTS._call_count += 1
+            if MockGeminiTTS._call_count > settings.GEMINI_MOCK_TTS_LIMIT:
+                # raise a specific exception so callers can treat quota exhaustion as a temporary, resumable
+                # condition instead of a permanent failure.
+                raise QuotaExceeded(f"Gemini TTS mock limit ({settings.GEMINI_MOCK_TTS_LIMIT}) exceeded.")
+        return await ffmpeg.synth_tone(out_path, max(0.3, len(text) / 14.0))
+
+
 @dataclass
 class Providers:
     asr: ASR
@@ -413,6 +446,9 @@ def default_providers() -> Providers:
     if settings.PROVIDER_MODE == "fake":
         return Providers(FakeASR(), FakeTranslator(), FakeTTS(), NoLipSync(), FakeCloner())
     if settings.PROVIDER_MODE == "gemini":
+        if settings.GEMINI_MOCK_TTS_LIMIT > 0:
+            return Providers(GeminiASR(), LLMTranslator(f"{GEMINI}/openai", _gemini_key(), settings.GEMINI_MODEL),
+                             MockGeminiTTS(), NoLipSync(), NoCloner())
         return Providers(GeminiASR(), LLMTranslator(f"{GEMINI}/openai", _gemini_key(), settings.GEMINI_MODEL),
                          GeminiTTS(), NoLipSync(), NoCloner())
     return Providers(OpenAIWhisperASR(), LLMTranslator(), ElevenLabsTTS(), NoLipSync(), ElevenLabsCloner())
