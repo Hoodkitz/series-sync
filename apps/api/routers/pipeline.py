@@ -1,7 +1,6 @@
 """Uploads and dubbing jobs (all tenant-scoped; the tenant always comes from the token)."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -12,7 +11,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
-from apps.api.schemas.pipeline import (JobCreate, JobListResponse, JobResponse, SegmentEdit, UploadResponse)
+from apps.api.schemas.pipeline import (
+    JobCreate,
+    JobListResponse,
+    JobResponse,
+    SegmentEdit,
+    UploadResponse,
+)
 from apps.api.security.permissions import check_permission
 from apps.core.config import settings
 from apps.core.models import JobStatus
@@ -180,7 +185,9 @@ async def render(job_id: UUID, background: BackgroundTasks,
                  session: AsyncSession = Depends(get_session), pipeline: DubbingPipeline = Depends(get_pipeline)):
     """Resume a failed job or re-render after edits; finished stages are reused, nothing is paid twice."""
     job = await _job(session, job_id, user)
-    if is_running(job.id) or (job.status in ACTIVE and job.status != JobStatus.UPLOADED.value and _recent(job)):
+    if is_running(job.id):
+        raise HTTPException(409, "Job is currently running")
+    if job.status in ACTIVE and job.status not in (JobStatus.UPLOADED.value, JobStatus.TTS_GENERATION.value) and _recent(job) and not job.errors:
         raise HTTPException(409, "Job is still processing")
     if job.status in (JobStatus.COMPLETED.value, JobStatus.HITL_REVIEW.value) and job.final_video:
         raise HTTPException(409, "Nothing changed since the last render")

@@ -18,7 +18,12 @@ from apps.core.config import settings
 from apps.core.models import JobStatus
 from apps.db.models import SyncJob, VoiceProfile
 from apps.media import ffmpeg, storage
-from apps.services.providers import Providers, ProviderError, default_providers
+from apps.services.providers import (
+    ProviderError,
+    Providers,
+    QuotaExceeded,
+    default_providers,
+)
 
 log = logging.getLogger("seriessync.pipeline")
 
@@ -114,9 +119,16 @@ class DubbingPipeline:
                     await set_tenant_context(session, tenant_id)
                 job = await session.get(SyncJob, job_id)
                 if job is not None:
-                    job.status = JobStatus.FAILED.value
-                    job.errors = (job.errors or []) + [_public_error(e)]
-                    await session.commit()
+                    if isinstance(e, QuotaExceeded):
+                        # Temporary provider quota exhausted (e.g. Gemini free-tier mock limit).
+                        # Leave the job in the TTS generation state so the worker can retry later.
+                        job.status = JobStatus.TTS_GENERATION.value
+                        job.errors = (job.errors or []) + [str(e)[:500]]
+                        await session.commit()
+                    else:
+                        job.status = JobStatus.FAILED.value
+                        job.errors = (job.errors or []) + [_public_error(e)]
+                        await session.commit()
 
     # ------------------------------------------------------------------ stages
     async def _ensure_still_wanted(self, session, job: SyncJob) -> None:

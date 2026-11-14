@@ -1,5 +1,6 @@
 """Core configuration."""
 import os
+
 from pydantic_settings import BaseSettings
 
 
@@ -26,6 +27,10 @@ class Settings(BaseSettings):
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     GEMINI_TTS_MODEL: str = os.getenv("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
     GEMINI_TTS_VOICE: str = os.getenv("GEMINI_TTS_VOICE", "Kore")
+    # When PROVIDER_MODE=gemini and tests or local development should not call the real API,
+    # set GEMINI_MOCK_TTS_LIMIT to a positive integer to simulate the free-tier daily TTS limit.
+    # 0 = unlimited (default).
+    GEMINI_MOCK_TTS_LIMIT: int = int(os.getenv("GEMINI_MOCK_TTS_LIMIT", "0"))
     # fake = deterministic local providers (dev/tests); real = OpenAI-compatible ASR/LLM + ElevenLabs;
     # gemini = one Google key for transcription, translation and speech (no voice cloning)
     PROVIDER_MODE: str = os.getenv("PROVIDER_MODE", "real")
@@ -33,6 +38,8 @@ class Settings(BaseSettings):
     MAX_UPLOAD_MB: int = int(os.getenv("MAX_UPLOAD_MB", "4096"))
     MAX_DURATION_MINUTES: int = int(os.getenv("MAX_DURATION_MINUTES", "90"))
     BACKGROUND_VOLUME: float = float(os.getenv("BACKGROUND_VOLUME", "0.18"))
+    WORKER_ENABLED: bool = os.getenv("WORKER_ENABLED", "false").lower() in ("true", "1", "yes")
+    WORKER_POLL_INTERVAL: float = float(os.getenv("WORKER_POLL_INTERVAL", "30.0"))
 
     class Config:
         env_file = ".env"

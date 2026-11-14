@@ -9,6 +9,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
@@ -20,6 +21,10 @@ from apps.media import ffmpeg
 
 class ProviderError(RuntimeError):
     """A provider call failed in a way that retrying the job later may fix."""
+
+
+class QuotaExceeded(ProviderError):
+    """Provider quota or mock quota exceeded: temporary, retry later."""
 
 
 @dataclass
@@ -69,8 +74,13 @@ async def _post(url: str, *, headers: dict, retries: int = 3, timeout: float = 3
         try:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as c:
                 r = await c.post(url, headers=headers, **kw)
-            if r.status_code in (429, 500, 502, 503, 504):
-                last = ProviderError(f"{url.split('?')[0]} -> HTTP {r.status_code} (rate limit or provider busy)")
+            if r.status_code == 429:
+                text = r.text or ""
+                last = QuotaExceeded(f"{url.split('?')[0]} -> HTTP 429 Quota/Rate limit exceeded: {text[:200]}")
+                await asyncio.sleep(_retry_delay(r, attempt))
+                continue
+            if r.status_code in (500, 502, 503, 504):
+                last = ProviderError(f"{url.split('?')[0]} -> HTTP {r.status_code} (provider busy)")
                 await asyncio.sleep(_retry_delay(r, attempt))
                 continue
             if r.status_code >= 400:
@@ -260,6 +270,69 @@ class FakeCloner:
         self.deleted = getattr(self, "deleted", []) + [voice_id]
 
 
+class MockGeminiTTS:
+    """Mock Gemini speech synthesis (prebuilt voices, multilingual; returns 24 kHz PCM).
+    Simulates Gemini Free-Tier quota limits (e.g. 10 TTS requests/day) with automatic daily
+    calendar reset (UTC) and resumable error handling."""
+    MALE = ["Charon", "Puck", "Fenrir", "Orus", "Iapetus", "Algenib", "Umbriel", "Enceladus"]
+    FEMALE = ["Kore", "Aoede", "Leda", "Zephyr", "Callirrhoe", "Despina", "Erinome", "Laomedeia"]
+
+    _daily_calls: dict[str, int] = {}
+
+    def __init__(self, limit: int | None = None):
+        self.limit = limit
+
+    @classmethod
+    def reset(cls) -> None:
+        """Reset call count records across all days."""
+        cls._daily_calls.clear()
+
+    @classmethod
+    def get_today_key(cls, dt: datetime | None = None) -> str:
+        d = dt or datetime.now(timezone.utc)
+        return d.strftime("%Y-%m-%d")
+
+    @classmethod
+    def get_calls_today(cls, today_key: str | None = None) -> int:
+        key = today_key or cls.get_today_key()
+        return cls._daily_calls.get(key, 0)
+
+    @classmethod
+    def set_calls_today(cls, count: int, today_key: str | None = None) -> None:
+        key = today_key or cls.get_today_key()
+        cls._daily_calls[key] = count
+
+    def get_effective_limit(self) -> int:
+        if self.limit is not None:
+            return self.limit
+        return settings.GEMINI_MOCK_TTS_LIMIT
+
+    def auto_voices(self, segments: list[dict]) -> dict[str, str]:
+        used: dict[str, str] = {}
+        pools = {"male": list(self.MALE), "female": list(self.FEMALE), "unknown": list(self.MALE + self.FEMALE)}
+        for seg in segments:
+            spk = seg.get("speaker", "S1")
+            if spk in used:
+                continue
+            pool = pools.get(seg.get("gender", "unknown"), pools["unknown"])
+            voice = next((v for v in pool if v not in used.values()), pool[len(used) % len(pool)])
+            used[spk] = voice
+        return used
+
+    async def synthesize(self, text: str, voice_id: str, language: str, out_path: Path) -> Path:
+        limit = self.get_effective_limit()
+        if limit > 0:
+            today_key = self.get_today_key()
+            current_calls = self._daily_calls.get(today_key, 0)
+            if current_calls >= limit:
+                raise QuotaExceeded(
+                    f"Gemini TTS daily quota limit ({limit}/day) exceeded for {today_key}. "
+                    "Resumable tomorrow when the daily free-tier quota resets."
+                )
+            self._daily_calls[today_key] = current_calls + 1
+        return await ffmpeg.synth_tone(out_path, max(0.3, len(text) / 14.0))
+
+
 @dataclass
 class Providers:
     asr: ASR
@@ -377,6 +450,8 @@ class GeminiTTS:
         if part is None:  # very short lines ("Egal.") are sometimes refused; a style hint makes them speakable
             part, reason = await self._request(f"Say naturally, in a casual tone: {text}", voice)
         if part is None:
+            if "RESOURCE_EXHAUSTED" in reason or "quota" in reason.lower():
+                raise QuotaExceeded(f"Gemini TTS quota limit exceeded (finish reason: {reason})")
             raise ProviderError(f"speech synthesis returned no audio (finish reason: {reason})")
         try:
             pcm = base64.b64decode(part["data"])
@@ -413,6 +488,9 @@ def default_providers() -> Providers:
     if settings.PROVIDER_MODE == "fake":
         return Providers(FakeASR(), FakeTranslator(), FakeTTS(), NoLipSync(), FakeCloner())
     if settings.PROVIDER_MODE == "gemini":
+        if settings.GEMINI_MOCK_TTS_LIMIT > 0:
+            return Providers(GeminiASR(), LLMTranslator(f"{GEMINI}/openai", _gemini_key(), settings.GEMINI_MODEL),
+                             MockGeminiTTS(), NoLipSync(), NoCloner())
         return Providers(GeminiASR(), LLMTranslator(f"{GEMINI}/openai", _gemini_key(), settings.GEMINI_MODEL),
                          GeminiTTS(), NoLipSync(), NoCloner())
     return Providers(OpenAIWhisperASR(), LLMTranslator(), ElevenLabsTTS(), NoLipSync(), ElevenLabsCloner())

@@ -1,27 +1,7 @@
 """HTTP flow: register -> upload -> dub -> review/edit -> re-render -> download; tenant isolation; voices."""
 import asyncio
 
-import pytest
-from fastapi.testclient import TestClient
-
-from apps.api.main import app
-from apps.api.routers import pipeline as pipeline_router
-from apps.db.session import get_session
 from apps.services import providers as prov
-from apps.services.dubbing_pipeline import DubbingPipeline
-
-
-@pytest.fixture
-def client(session_factory):
-    async def _session():
-        async with session_factory() as s:
-            yield s
-
-    app.dependency_overrides[get_session] = _session
-    app.dependency_overrides[pipeline_router.get_pipeline] = lambda: DubbingPipeline(session_factory)
-    with TestClient(app) as c:
-        yield c
-    app.dependency_overrides.clear()
 
 
 def login(c, email):
