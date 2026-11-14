@@ -18,7 +18,12 @@ from apps.core.config import settings
 from apps.core.models import JobStatus
 from apps.db.models import SyncJob, VoiceProfile
 from apps.media import ffmpeg, storage
-from apps.services.providers import Providers, ProviderError, QuotaExceeded, default_providers
+from apps.services.providers import (
+    ProviderError,
+    Providers,
+    QuotaExceeded,
+    default_providers,
+)
 
 log = logging.getLogger("seriessync.pipeline")
 

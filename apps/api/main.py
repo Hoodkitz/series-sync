@@ -4,10 +4,11 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from apps.core.config import settings
-from apps.api.routers import pipeline, voices, stats
 
-from apps.api.routers import auth
+from apps.api.routers import auth, pipeline, stats, voices
+from apps.core.config import settings
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     # Local demo on SQLite: create tables. Postgres deployments use `alembic upgrade head` (RLS, roles).
@@ -16,7 +17,23 @@ async def lifespan(_: FastAPI):
         from apps.db.session import engine
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+
+    worker_task = None
+    if settings.WORKER_ENABLED:
+        import asyncio
+
+        from apps.db.session import AsyncSessionLocal
+        from apps.services.worker import run_worker_loop
+        worker_task = asyncio.create_task(
+            run_worker_loop(AsyncSessionLocal, poll_interval=settings.WORKER_POLL_INTERVAL)
+        )
     yield
+    if worker_task:
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title="Series Sync SaaS", version="1.0.0", docs_url="/docs", lifespan=lifespan)

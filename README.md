@@ -69,13 +69,26 @@ Weitere Endpunkte: `GET /jobs`, `GET /jobs/{id}/output` (Download), `POST /jobs/
 - `PROVIDER_MODE=real`: OpenAI (Whisper + LLM) + ElevenLabs (inkl. Stimmklon).
 - `PROVIDER_MODE=fake`: lokale Demo/Tests ohne Kosten.
 
+## Betrieb & Robustheit (Gemini Free Tier & Wiederaufnahme)
+
+Series Sync ist speziell auf den zuverlässigen Betrieb unter begrenzten API-Kontingenten (z.B. Google Gemini Free-Tier mit 10 TTS/Tag und 3 RPM) ausgelegt:
+- **Intelligente Quota-Behandlung:** Bei Quota-Überschreitung (`QuotaExceeded` / HTTP 429) wird der Job nicht als `FAILED` verworfen, sondern im Zustand `tts_generation` angehalten.
+- **Lückenloses Checkpointing:** Bereits synthetisierte Audiozeilen und Vorstufen (ASR, Übersetzung) bleiben auf Disk und in der Datenbank erhalten.
+- **Wiederaufnahme statt Neustart:** Bei Kontingent-Reset am Folgetag werden nur noch die ausstehenden Zeilen generiert – keine doppelten API-Kosten.
+- **Hintergrund-Worker:** Wiederaufnahme erfolgt entweder automatisch über den integrierten Worker (`WORKER_ENABLED=true`), als Standalone-Dienst (`python -m apps.worker`) oder manuell per API-Aufruf (`POST /jobs/{id}/render`).
+- **Free-Tier-Simulation:** Mit `GEMINI_MOCK_TTS_LIMIT=10` kann das Kontingentverhalten lokal und in Tests ohne Kosten simuliert werden (mit automatischem Tagesreset nach UTC).
+
+Detaillierte Betriebsanleitung und Konfigurationsoptionen: [docs/operations.md](file:///home/administrator/series-sync/docs/operations.md).
+
 ## Setup
 
 ```bash
-cp .env.example .env            # Werte eintragen
-pip install -r requirements.txt # + ffmpeg installieren
-alembic upgrade head            # als DB-Owner; App läuft mit eigener Rolle ohne Owner-Rechte
+cp .env.example .env                                    # Werte eintragen
+pip install -r requirements.txt -r requirements-dev.txt # + ffmpeg installieren
+alembic upgrade head                                    # als DB-Owner; App läuft mit eigener Rolle ohne Owner-Rechte
 uvicorn apps.api.main:app
+# Optional in separatem Terminal: Hintergrund-Worker starten
+python -m apps.worker --interval 30
 ```
 
 Lokale Demo ohne API-Kosten: `ENV=development PROVIDER_MODE=fake uvicorn apps.api.main:app` (Platzhalter-Töne statt Stimmen).

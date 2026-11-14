@@ -1,5 +1,6 @@
 """Core configuration."""
 import os
+
 from pydantic_settings import BaseSettings
 
 
@@ -37,6 +38,8 @@ class Settings(BaseSettings):
     MAX_UPLOAD_MB: int = int(os.getenv("MAX_UPLOAD_MB", "4096"))
     MAX_DURATION_MINUTES: int = int(os.getenv("MAX_DURATION_MINUTES", "90"))
     BACKGROUND_VOLUME: float = float(os.getenv("BACKGROUND_VOLUME", "0.18"))
+    WORKER_ENABLED: bool = os.getenv("WORKER_ENABLED", "false").lower() in ("true", "1", "yes")
+    WORKER_POLL_INTERVAL: float = float(os.getenv("WORKER_POLL_INTERVAL", "30.0"))
 
     class Config:
         env_file = ".env"

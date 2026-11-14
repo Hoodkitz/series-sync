@@ -9,11 +9,11 @@ os.environ["STORAGE_DIR"] = os.path.join(_tmp, "storage")
 # Postgres RLS tests run only when DATABASE_URL is given explicitly (CI service / local test DB).
 os.environ.setdefault("DATABASE_URL", f"sqlite+aiosqlite:///{_tmp}/app.db")
 
-import pytest  # noqa: E402
-import pytest_asyncio  # noqa: E402
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine  # noqa: E402
+import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from apps.db.models import Base  # noqa: E402
+from apps.db.models import Base
 
 pytest_plugins = ("pytest_asyncio",)
 
@@ -44,7 +44,28 @@ async def session_factory():
 @pytest.fixture(scope="session")
 def sample_video(tmp_path_factory):
     import asyncio
+
     from apps.media import ffmpeg
     p = tmp_path_factory.mktemp("media") / "episode.mp4"
     asyncio.run(ffmpeg.synth_test_video(p, seconds=8.0))
     return p
+
+
+@pytest.fixture
+def client(session_factory):
+    from fastapi.testclient import TestClient
+
+    from apps.api.main import app
+    from apps.api.routers import pipeline as pipeline_router
+    from apps.db.session import get_session
+    from apps.services.dubbing_pipeline import DubbingPipeline
+
+    async def _session():
+        async with session_factory() as s:
+            yield s
+
+    app.dependency_overrides[get_session] = _session
+    app.dependency_overrides[pipeline_router.get_pipeline] = lambda: DubbingPipeline(session_factory)
+    with TestClient(app) as c:
+        yield c
+    app.dependency_overrides.clear()
